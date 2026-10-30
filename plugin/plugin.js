@@ -272,7 +272,22 @@ function StatusChip({ onToggle }) {
   })
 }
 
+// Core Bots list rows carry data-roster-key="<connection>::<profile>". Pure CSS keyed on that
+// attribute: no DOM observers, nothing to undo but removing the <style>.
+export function rowCss(rows) {
+  return rows
+    .filter(r => (r.state === 'thinking' || r.state === 'job') && /^[\w.-]+$/.test(r.name))
+    .map(r => {
+      const speed = r.state === 'thinking' ? '1.2s' : '2.6s'
+      return `[data-roster-key$="::${r.name}"]{--crew-c:${COLORS[r.name] || FALLBACK_COLOR};animation:crew-glow-core ${speed} ease-in-out infinite}`
+    })
+    .join('\n')
+}
+
 const CSS = `
+@keyframes crew-glow-core{0%,100%{background:color-mix(in srgb,var(--crew-c) 8%,transparent)}50%{background:color-mix(in srgb,var(--crew-c) 30%,transparent)}}
+@media (prefers-reduced-motion:reduce){[data-roster-key]{animation:none!important}}
+`+`
 .crew-pane{display:flex;flex-direction:column;height:100%;overflow:auto;font-size:.75rem}
 .crew-list{display:flex;flex-direction:column;padding:4px}
 .crew-row{display:flex;gap:8px;align-items:flex-start;width:100%;padding:6px 8px;border:0;border-radius:4px;background:transparent;text-align:left;cursor:pointer}
@@ -312,7 +327,26 @@ export default {
     style.id = STYLE_ID
     style.textContent = CSS
     document.head.appendChild(style)
-    ctx.onDispose(() => document.getElementById(STYLE_ID)?.remove())
+    const rowsStyle = document.createElement('style')
+    rowsStyle.id = STYLE_ID + '-rows'
+    document.head.appendChild(rowsStyle)
+    ctx.onDispose(() => {
+      document.getElementById(STYLE_ID)?.remove()
+      rowsStyle.remove()
+    })
+    const syncRows = () => {
+      const css = rowCss(
+        deriveRows({
+          crew: $crew.get(),
+          roster: $roster.get(),
+          focusedProfile: (host.state.focusedSessionProfile || host.state.profile).get(),
+          busy: host.state.busy.get(),
+          now: Date.now(),
+        })
+      )
+      if (rowsStyle.textContent !== css) rowsStyle.textContent = css
+    }
+    ctx.setInterval(syncRows, 1000)
 
     const mountPane = () => {
       if (paneDispose) paneDispose()

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import plugin, { ago, deriveRows, fmtElapsed } from '../plugin.js'
+import plugin, { rowCss, ago, deriveRows, fmtElapsed } from '../plugin.js'
 
 const NOW = 1_800_000_000_000
 const sec = n => NOW / 1000 - n
@@ -81,4 +81,11 @@ test('hover details carry through: command, pid, cwd, startedAt, lastWrite', () 
   const [r] = deriveRows({ crew: c, roster: [row('reviewer', { last_session: { last_active: sec(200) } })], focusedProfile: null, busy: false, now: NOW })
   assert.deepEqual([r.jobs[0].pid, r.jobs[0].cwd, r.jobs[0].command, r.lastWrite], [7, 'F:/p', 'run it', sec(200)])
   assert.equal(ago(200), '3m 20s ago')
+})
+
+test('rowCss targets only busy bots by roster-key suffix, with bot colour', () => {
+  const css = rowCss([{ name: 'reviewer', state: 'job' }, { name: 'foreman', state: 'thinking' }, { name: 'scout', state: 'idle' }, { name: 'bad"]x', state: 'job' }])
+  assert.ok(css.includes('[data-roster-key$="::reviewer"]{--crew-c:#DC143C;animation:crew-glow-core 2.6s'))
+  assert.ok(css.includes('::foreman"]{--crew-c:#FFD700;animation:crew-glow-core 1.2s'))
+  assert.ok(!css.includes('scout') && !css.includes('bad'))
 })
