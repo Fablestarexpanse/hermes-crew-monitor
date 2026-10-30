@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Crew Monitor demo</title>
+<!-- Renders the real plugin/plugin.js against a stubbed SDK and invented data, to make README screenshots.
+     Serve the repo root (python -m http.server) and open /docs/demo/index.html?theme=dark&hover=Reviewer -->
+<script type="importmap">
+{ "imports": {
+  "react": "https://esm.sh/react@18.3.1",
+  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+  "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+  "@hermes/plugin-sdk": "./demo-sdk.js"
+} }
+</script>
+<style>
+:root{--bg:#fbfbfa;--side:#f3f2f0;--fg:#1f2328;--ui-text-secondary:#3b4048;--ui-text-tertiary:#6b717a;--ui-text-quaternary:#a0a5ad;
+--ui-stroke-secondary:#e2e0dc;--ui-accent:#2b7de9;--chrome-action-hover:rgba(0,0,0,.05);--ui-bg-elevated:#fff}
+:root[data-theme=dark]{--bg:#17181b;--side:#1d1f23;--fg:#e6e8eb;--ui-text-secondary:#d0d3d8;--ui-text-tertiary:#8b919b;--ui-text-quaternary:#5c616a;
+--ui-stroke-secondary:#2c2f35;--ui-accent:#5aa2ff;--chrome-action-hover:rgba(255,255,255,.06);--ui-bg-elevated:#24272c}
+*{box-sizing:border-box}
+button{font:inherit}
+body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:13px/1.35 system-ui,Segoe UI,sans-serif}
+.main{flex:1;display:flex;min-height:0}
+.side{width:270px;background:var(--side);border-right:1px solid var(--ui-stroke-secondary);padding:10px 8px;overflow:hidden}
+.side h4{margin:4px 8px 8px;font-size:11px;letter-spacing:.06em;color:var(--ui-text-quaternary)}
+.mrow{display:flex;gap:10px;align-items:center;width:100%;padding:8px;border:0;border-radius:6px;background:transparent;text-align:left;color:inherit;font:inherit}
+.avatar{flex:none;width:30px;height:30px;border-radius:50%}
+.mrow .col{min-width:0;flex:1}.mrow .top{display:flex;justify-content:space-between;gap:8px}
+.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.font-medium{font-weight:500;font-size:13px}
+.age{font-size:11px;color:var(--ui-text-quaternary)}.prev{font-size:12px;color:var(--ui-text-tertiary)}
+.chat{flex:1;display:grid;place-items:center;color:var(--ui-text-quaternary)}
+.pane{width:280px;border-left:1px solid var(--ui-stroke-secondary);background:var(--bg);overflow:hidden}
+.pane-title{padding:8px 12px;font-size:11px;letter-spacing:.06em;color:var(--ui-text-quaternary);border-bottom:1px solid var(--ui-stroke-secondary)}
+.status{height:26px;border-top:1px solid var(--ui-stroke-secondary);display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:0 10px;color:var(--ui-text-tertiary);font-size:11px;background:var(--side)}
+.tip-wrap{display:block}
+.tip-card{position:fixed;z-index:10;max-width:24rem;padding:8px 10px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:var(--ui-bg-elevated);box-shadow:0 6px 24px rgba(0,0,0,.18);color:var(--ui-text-secondary)}
+</style>
+<body>
+<div class="main">
+  <div class="side"><h4>BOTS</h4><div id="side"></div></div>
+  <div class="chat">chat</div>
+  <div class="pane"><div class="pane-title">CREW</div><div id="pane"></div></div>
+</div>
+<div class="status"><span>Today &lt;1%</span><span>Smart</span><span id="chip"></span></div>
+
+<script type="module">
+import { createElement as h } from 'react'
+import { createRoot } from 'react-dom/client'
+import { host } from '@hermes/plugin-sdk'
+import plugin from '../../plugin/plugin.js'
+
+const q = new URLSearchParams(location.search)
+document.documentElement.dataset.theme = q.get('theme') === 'dark' ? 'dark' : 'light'
+const now = Date.now() / 1000
+
+// Invented data. Names/colours match the shipped skins; nothing here is from a real session.
+const bots = [
+  ['foreman', 'Foreman', 'Assigning the render pass to asset-bot', '#FFD700'],
+  ['reviewer', 'Reviewer', 'Review is running (batch 7 of 20)', '#DC143C'],
+  ['researcher', 'Researcher', 'Deep research started: shader LOD costs', '#2BB3A3'],
+  ['scout', 'Scout', 'Brief written, 2 sends left', '#2BB3A3'],
+  ['senior-dev', 'Senior Dev', 'Unity tests running', '#4169E1'],
+  ['asset-bot', 'Asset Bot', 'GPU job queued for comfyui', '#E8661E'],
+  ['design-partner', 'Design Partner', 'Palette approved', '#4169E1'],
+  ['librarian', 'Librarian', 'Filed 14 notes', '#9AA0A6'],
+]
+const jobs = {
+  reviewer: [{ label: 'desloppify review', started_at: now - 3725, pid: 48500, cwd: 'F:\\Game Projects\\Demo', command: 'python local_review.py "F:/Game Projects/Demo/.desloppify/runs/2026" --repo .', progress: { done: 7, total: 20, unit: 'batches' } }],
+  researcher: [{ label: 'deep research', started_at: now - 1500, pid: 20412, cwd: 'F:\\Research', command: 'python research.py "shader LOD costs"' }],
+  'senior-dev': [{ label: 'Unity tests', started_at: now - 740, pid: 31188, cwd: 'F:\\Game Projects\\Demo', command: 'Unity.exe -runTests -testPlatform PlayMode' }],
+  'asset-bot': [{ label: 'GPU job (comfyui)', started_at: now - 245, pid: 9920, cwd: 'F:\\Hermes\\tools', command: 'python gpu_job.py --app comfyui -- render.json' }],
+}
+const crew = {
+  gpu: { state: 'held', label: 'held by gpu_job comfyui' },
+  bots: bots.map(([name, title]) => ({
+    name, title, jobs: jobs[name] || [],
+    tasks: name === 'scout' ? { done: 3, total: 5, items: [{ status: 'running', title: 'Write the shader brief' }, { status: 'todo', title: 'Send brief to Foreman' }] } : null,
+  })),
+}
+const realFetch = window.fetch
+window.fetch = (url, opts) => String(url).includes(':8094')
+  ? Promise.resolve(new Response(JSON.stringify(crew), { status: 200 }))
+  : realFetch(url, opts)
+host.request = async () => ({ profiles: bots.map(([name]) => ({ name, canonical_session: { id: name } })) })
+host.state.focusedSessionProfile.set('foreman')
+host.state.busy.set(true)
+
+// Mock of the core Bots list rows: only the pieces the plugin's CSS targets (data-roster-key, span.truncate.font-medium)
+createRoot(document.getElementById('side')).render(
+  bots.map(([name, title, preview, color], i) =>
+    h('button', { key: name, className: 'mrow', 'data-roster-key': `local::${name}` },
+      h('div', { className: 'avatar', style: { background: color, opacity: 0.8 } }),
+      h('div', { className: 'col' },
+        h('div', { className: 'top' }, h('div', { style: { display: 'flex', minWidth: 0 } }, h('span', { className: 'truncate font-medium' }, title)), h('span', { className: 'age' }, 'now')),
+        h('div', { className: 'prev truncate' }, preview))))
+)
+
+let paneNode, chipNode
+plugin.register({
+  storage: { get: (_k, d) => d, set() {} },
+  onDispose() {},
+  setInterval: (fn, ms) => { const id = setInterval(fn, ms); return () => clearInterval(id) },
+  register: c => { if (c.id === 'pane') paneNode = c.render(); return () => {} },
+  registerMany: cs => { chipNode = cs.find(c => c.id === 'chip').render() },
+})
+createRoot(document.getElementById('pane')).render(paneNode)
+createRoot(document.getElementById('chip')).render(chipNode)
+
+const want = q.get('hover')
+if (want) setTimeout(() => {
+  const row = [...document.querySelectorAll('.crew-row')].find(r => r.textContent.startsWith(want))
+  row?.parentElement.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+  row?.parentElement.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
+  document.title = 'ready'
+}, 1500)
+</script>

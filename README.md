@@ -17,6 +17,23 @@ strip shows them idle while the job still runs.
   palette entry **Crew Monitor: toggle panel** show/hide the panel.
 - If the status service is down the panel says so and still shows thinking state.
 
+## Screenshots
+Rendered from the real `plugin/plugin.js` with invented data (no real sessions). The left list is a mock of
+the core Bots rows; the plugin only styles them, it does not draw them. The page that makes them is
+`docs/demo/index.html` (serve the repo root and open it).
+
+![Dark: busy bots pulse in their colour; badges show 7/20 batches and tasks 3/5](docs/img/overview-dark.png)
+
+![Light theme](docs/img/overview-light.png)
+
+Hover a row for details: job start, pid, folder and command line.
+
+![Hover card on a running review](docs/img/hover-reviewer-dark.png)
+
+Bots with open kanban tasks list them.
+
+![Hover card with kanban tasks](docs/img/hover-scout-light.png)
+
 ## Install
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
