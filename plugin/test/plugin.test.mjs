@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import plugin, { deriveRows, fmtElapsed } from '../plugin.js'
+import plugin, { ago, deriveRows, fmtElapsed } from '../plugin.js'
 
 const NOW = 1_800_000_000_000
 const sec = n => NOW / 1000 - n
@@ -74,4 +74,11 @@ test('roster title and canonical session are used; sort puts busy first', () => 
   const scout = rows.find(x => x.name === 'scout')
   assert.equal(scout.title, 'Scout Prime')
   assert.equal(scout.canonical.resolved_id, 'b')
+})
+
+test('hover details carry through: command, pid, cwd, startedAt, lastWrite', () => {
+  const c = { bots: [{ name: 'reviewer', title: 'Reviewer', jobs: [{ label: 'x', started_at: sec(10), pid: 7, cwd: 'F:/p', command: 'run it' }] }] }
+  const [r] = deriveRows({ crew: c, roster: [row('reviewer', { last_session: { last_active: sec(200) } })], focusedProfile: null, busy: false, now: NOW })
+  assert.deepEqual([r.jobs[0].pid, r.jobs[0].cwd, r.jobs[0].command, r.lastWrite], [7, 'F:/p', 'run it', sec(200)])
+  assert.equal(ago(200), '3m 20s ago')
 })

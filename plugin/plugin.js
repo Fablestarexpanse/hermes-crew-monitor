@@ -5,7 +5,7 @@
 //    (focused live turn, last_session written in the last 90 s, worker heartbeat in 150 s).
 //  - background jobs + GPU line: the read-only status service on 127.0.0.1:8094 (a plugin cannot
 //    read files or probe pids itself).
-import { PALETTE_AREA, STATUSBAR_AREAS, atom, host, useValue } from '@hermes/plugin-sdk'
+import { PALETTE_AREA, STATUSBAR_AREAS, Tip, atom, host, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useState } from 'react'
 
@@ -48,6 +48,10 @@ export function fmtElapsed(seconds) {
  * Merge service data (jobs, titles), roster rows (liveness) and the focused turn into display rows.
  * state: 'thinking' | 'job' | 'idle' | 'offline'. A thinking bot keeps its jobs listed.
  */
+export function ago(seconds) {
+  return seconds == null ? '' : `${fmtElapsed(seconds)} ago`
+}
+
 export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
   const nowS = now / 1000
   const byName = new Map()
@@ -74,10 +78,14 @@ export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
       const jobs = b.jobs.map(j => ({
         label: j.label,
         elapsed: j.started_at ? nowS - j.started_at : j.elapsed_s,
+        startedAt: j.started_at,
+        pid: j.pid,
+        cwd: j.cwd,
+        command: j.command,
       }))
       // A worker heartbeat with no process-registry entry (kanban/tool worker) still deserves a line.
       if (!jobs.length && state === 'job') jobs.push({ label: 'working in background', elapsed: null })
-      return { name: b.name, title: b.title, state, jobs, canonical: row && row.canonical_session }
+      return { name: b.name, title: b.title, state, jobs, lastWrite: lastWrite || null, canonical: row && row.canonical_session }
     })
     .sort((a, c) => rank(a.state) - rank(c.state) || a.title.localeCompare(c.title))
 }
@@ -123,7 +131,7 @@ function useDerived() {
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
-  return { crew, roster, rows: deriveRows({ crew, roster, focusedProfile, busy, now }) }
+  return { crew, roster, now, rows: deriveRows({ crew, roster, focusedProfile, busy, now }) }
 }
 
 // ---- UI --------------------------------------------------------------------------------------
@@ -153,14 +161,35 @@ function openBotChat(bot) {
   )
 }
 
-function BotRow({ bot }) {
+function Hover({ bot, now }) {
+  const stateText = { thinking: 'thinking now', job: 'running a background job', idle: 'idle', offline: 'status unknown (roster unreachable)' }[bot.state]
+  const dim = { color: 'var(--ui-text-tertiary)' }
+  return jsxs('div', {
+    className: 'crew-tip',
+    children: [
+      jsxs('div', { children: [jsx('b', { children: bot.title }), jsx('span', { style: dim, children: ` · ${bot.name}` })] }),
+      jsx('div', { style: dim, children: stateText }),
+      bot.lastWrite ? jsx('div', { style: dim, children: `last wrote ${ago(now / 1000 - bot.lastWrite)}` }) : null,
+      ...bot.jobs.map((j, i) =>
+        jsxs('div', { className: 'crew-tip-job', children: [
+          jsx('div', { children: j.label + (j.elapsed != null ? ` · ${fmtElapsed(j.elapsed)}` : '') }),
+          j.startedAt ? jsx('div', { style: dim, children: `started ${new Date(j.startedAt * 1000).toLocaleTimeString()}${j.pid ? ` · pid ${j.pid}` : ''}` }) : null,
+          j.cwd ? jsx('div', { style: dim, className: 'crew-tip-mono', children: j.cwd }) : null,
+          j.command ? jsx('div', { style: dim, className: 'crew-tip-mono', children: j.command }) : null,
+        ] }, i)
+      ),
+    ],
+  })
+}
+
+function BotRow({ bot, now }) {
   const color = COLORS[bot.name] || FALLBACK_COLOR
   const dim = bot.state === 'idle' || bot.state === 'offline'
   const status = bot.state === 'thinking' ? 'thinking' : bot.state === 'job' ? '' : bot.state
-  return jsxs('button', {
+  return jsx(Tip, { label: jsx(Hover, { bot, now }), side: 'left', className: 'max-w-96', children: jsxs('button', {
     type: 'button',
     className: 'crew-row',
-    title: `Open ${bot.title}`,
+    'aria-label': `Open ${bot.title}`,
     onClick: () => openBotChat(bot),
     children: [
       jsx(Dot, { color, state: bot.state }),
@@ -197,7 +226,7 @@ function BotRow({ bot }) {
         ],
       }),
     ],
-  })
+  }) })
 }
 
 function GpuRow({ gpu }) {
@@ -212,7 +241,7 @@ function GpuRow({ gpu }) {
 }
 
 function CrewPane() {
-  const { crew, rows } = useDerived()
+  const { crew, rows, now } = useDerived()
   return jsxs('div', {
     className: 'crew-pane',
     children: [
@@ -224,7 +253,7 @@ function CrewPane() {
             style: { color: 'var(--ui-text-tertiary)' },
             children: 'Status service offline: background jobs are not shown.',
           }),
-      jsx('div', { className: 'crew-list', children: rows.map(bot => jsx(BotRow, { bot }, bot.name)) }),
+      jsx('div', { className: 'crew-list', children: rows.map(bot => jsx(BotRow, { bot, now }, bot.name)) }),
     ],
   })
 }
@@ -257,6 +286,9 @@ const CSS = `
 .crew-job-time{flex:none;font-variant-numeric:tabular-nums}
 .crew-gpu{display:flex;gap:8px;align-items:center;padding:8px 12px}
 .crew-gpu .crew-dot{margin-top:0}
+.crew-tip{display:flex;flex-direction:column;gap:2px;font-size:.6875rem}
+.crew-tip-job{margin-top:6px;padding-top:4px;border-top:1px solid var(--ui-stroke-secondary)}
+.crew-tip-mono{font-family:ui-monospace,monospace;word-break:break-all}
 .crew-note{padding:6px 12px;font-size:.6875rem}
 .crew-chip{display:inline-flex;gap:5px;align-items:center;padding:0 6px;border:0;background:transparent;font-size:.6875rem;cursor:pointer}
 .crew-chip .crew-dot{margin-top:0;width:7px;height:7px}
