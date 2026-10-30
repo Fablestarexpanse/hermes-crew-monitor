@@ -188,7 +188,8 @@ function BotRow({ bot, now }) {
   const status = bot.state === 'thinking' ? 'thinking' : bot.state === 'job' ? '' : bot.state
   return jsx(Tip, { label: jsx(Hover, { bot, now }), side: 'left', className: 'max-w-96', children: jsxs('button', {
     type: 'button',
-    className: 'crew-row',
+    className: `crew-row crew-${bot.state}`,
+    style: { '--crew-c': color },
     'aria-label': `Open ${bot.title}`,
     onClick: () => openBotChat(bot),
     children: [
@@ -292,9 +293,12 @@ const CSS = `
 .crew-note{padding:6px 12px;font-size:.6875rem}
 .crew-chip{display:inline-flex;gap:5px;align-items:center;padding:0 6px;border:0;background:transparent;font-size:.6875rem;cursor:pointer}
 .crew-chip .crew-dot{margin-top:0;width:7px;height:7px}
+@keyframes crew-glow{0%,100%{background:color-mix(in srgb,var(--crew-c) 8%,transparent)}50%{background:color-mix(in srgb,var(--crew-c) 30%,transparent)}}
+.crew-row.crew-thinking{animation:crew-glow 1.2s ease-in-out infinite}
+.crew-row.crew-job{animation:crew-glow 2.6s ease-in-out infinite}
 @keyframes crew-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}
 .crew-pulse{animation:crew-pulse 1.2s ease-in-out infinite}
-@media (prefers-reduced-motion:reduce){.crew-pulse{animation:none}}
+@media (prefers-reduced-motion:reduce){.crew-pulse{animation:none}.crew-row.crew-thinking,.crew-row.crew-job{animation:none;background:color-mix(in srgb,var(--crew-c) 18%,transparent)}}
 `
 
 export default {
