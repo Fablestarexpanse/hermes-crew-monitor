@@ -190,19 +190,22 @@ def kanban_progress(db: Path, now: float, window_s: int = 86400) -> dict:
         con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1)
         try:
             rows = con.execute(
-                "SELECT assignee, status, completed_at FROM tasks WHERE assignee IS NOT NULL AND status != 'archived'"
+                "SELECT assignee, status, completed_at, title FROM tasks "
+                "WHERE assignee IS NOT NULL AND status != 'archived' ORDER BY created_at"
             ).fetchall()
         finally:
             con.close()
     except sqlite3.Error:
         return {}
     out: dict = {}
-    for who, status, completed in rows:
+    for who, status, completed, title in rows:
         if status == "done" and not (completed and now - completed <= window_s):
             continue
-        t = out.setdefault(who, {"done": 0, "total": 0})
+        t = out.setdefault(who, {"done": 0, "total": 0, "items": []})
         t["total"] += 1
         t["done"] += status == "done"
+        if status != "done" and len(t["items"]) < 6:  # open tasks, for the hover card
+            t["items"].append({"status": status, "title": " ".join(str(title or "").split())[:80]})
     return {k: v for k, v in out.items() if v["done"] < v["total"]}
 
 

@@ -163,15 +163,15 @@ class Progress(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             db = Path(t) / "kanban.db"
             con = sqlite3.connect(db)
-            con.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT, completed_at INTEGER)")
+            con.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT, completed_at INTEGER, title TEXT, created_at INTEGER)")
             rows = [("1", "scout", "done", NOW - 60), ("2", "scout", "done", NOW - 120), ("3", "scout", "running", None),
                     ("4", "scout", "todo", None), ("5", "scout", "done", NOW - 10 * 86400),  # too old: ignored
                     ("6", "scout", "archived", None), ("7", "foreman", "done", NOW - 5),  # all done: not reported
                     ("8", None, "todo", None)]
-            con.executemany("INSERT INTO tasks VALUES (?,?,?,?)", rows)
+            con.executemany("INSERT INTO tasks VALUES (?,?,?,?,?,?)", [r + (f"task {r[0]}", int(r[0])) for r in rows])
             con.commit()
             con.close()
-            self.assertEqual(cs.kanban_progress(db, NOW), {"scout": {"done": 2, "total": 4}})
+            self.assertEqual(cs.kanban_progress(db, NOW), {"scout": {"done": 2, "total": 4, "items": [{"status": "running", "title": "task 3"}, {"status": "todo", "title": "task 4"}]}})
 
     def test_kanban_missing_db_is_empty(self):
         self.assertEqual(cs.kanban_progress(Path("Z:/nope/kanban.db"), NOW), {})

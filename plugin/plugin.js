@@ -91,12 +91,21 @@ export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
     .sort((a, c) => rank(a.state) - rank(c.state) || a.title.localeCompare(c.title))
 }
 
-// "3/5": a running job's own progress (desloppify batches) wins over open kanban tasks.
+const pct = (done, total) => `${Math.round((100 * done) / total)}%`
+
+// Two independent readouts: the running job's own progress (desloppify batches, "2/20 10%") and the
+// bot's kanban tasks ("tasks 3/5 60%"). `badge` is what goes next to the name.
 export function progressOf(jobs, tasks) {
   const j = jobs.find(x => x.progress && x.progress.total)
-  if (j) return { text: `${j.progress.done}/${j.progress.total}`, what: j.progress.unit || 'steps' }
-  if (tasks && tasks.total) return { text: `${tasks.done}/${tasks.total}`, what: 'kanban tasks' }
-  return null
+  const batches = j
+    ? { text: `${j.progress.done}/${j.progress.total} ${pct(j.progress.done, j.progress.total)}`, what: j.progress.unit || 'steps' }
+    : null
+  const kanban =
+    tasks && tasks.total
+      ? { text: `tasks ${tasks.done}/${tasks.total} ${pct(tasks.done, tasks.total)}`, items: tasks.items || [] }
+      : null
+  if (!batches && !kanban) return null
+  return { batches, tasks: kanban, badge: [batches && batches.text, kanban && kanban.text].filter(Boolean).join(' · ') }
 }
 
 const rank = s => ({ thinking: 0, job: 1, idle: 2, offline: 3 })[s]
@@ -178,7 +187,13 @@ function Hover({ bot, now }) {
     children: [
       jsxs('div', { children: [jsx('b', { children: bot.title }), jsx('span', { style: dim, children: ` · ${bot.name}` })] }),
       jsx('div', { style: dim, children: stateText }),
-      bot.progress ? jsx('div', { style: dim, children: `${bot.progress.text} ${bot.progress.what}` }) : null,
+      bot.progress && bot.progress.batches ? jsx('div', { style: dim, children: `${bot.progress.batches.text} ${bot.progress.batches.what}` }) : null,
+      bot.progress && bot.progress.tasks
+        ? jsxs('div', { className: 'crew-tip-job', children: [
+            jsx('div', { children: bot.progress.tasks.text }),
+            ...bot.progress.tasks.items.map((t, i) => jsx('div', { style: dim, children: `${t.status} · ${t.title}` }, i)),
+          ] })
+        : null,
       bot.lastWrite ? jsx('div', { style: dim, children: `last wrote ${ago(now / 1000 - bot.lastWrite)}` }) : null,
       ...bot.jobs.map((j, i) =>
         jsxs('div', { className: 'crew-tip-job', children: [
@@ -216,7 +231,7 @@ function BotRow({ bot, now }) {
                 children: bot.title,
               }),
               bot.progress
-                ? jsx('span', { className: 'crew-progress', title: bot.progress.what, children: bot.progress.text })
+                ? jsx('span', { className: 'crew-progress', title: 'progress', children: bot.progress.badge })
                 : null,
               status
                 ? jsx('span', { className: 'crew-state', style: { color: 'var(--ui-text-tertiary)' }, children: status })
@@ -296,9 +311,9 @@ export function rowCss(rows) {
     if (r.state === 'thinking' || r.state === 'job') {
       out.push(`${row}{--crew-c:${color};animation:crew-glow-core ${r.state === 'thinking' ? '1.2s' : '2.6s'} ease-in-out infinite}`)
     }
-    // text is digits and a slash by construction (progressOf), so it is safe inside a CSS string
-    if (r.progress && /^\d+\/\d+$/.test(r.progress.text)) {
-      out.push(`${row} span.truncate.font-medium::after{content:"  ${r.progress.text}";font-weight:400;font-size:.6875rem;color:${color}}`)
+    // badge is digits, letters, spaces, / % and a dot by construction (progressOf); re-checked before it goes in a CSS string
+    if (r.progress && /^[\w %·/]+$/.test(r.progress.badge)) {
+      out.push(`${row} span.truncate.font-medium::after{content:"  ${r.progress.badge}";font-weight:400;font-size:.6875rem;color:${color}}`)
     }
   }
   return out.join('\n')
