@@ -1,0 +1,8 @@
+{
+  "name": "hermes-crew-monitor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import ./plugin/test/loader.mjs --test plugin/test/plugin.test.mjs && python -m unittest discover -s service"
+  }
+}

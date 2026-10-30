@@ -1,0 +1,77 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import plugin, { deriveRows, fmtElapsed } from '../plugin.js'
+
+const NOW = 1_800_000_000_000
+const sec = n => NOW / 1000 - n
+const crew = {
+  bots: [
+    { name: 'foreman', title: 'Foreman', jobs: [] },
+    { name: 'reviewer', title: 'Reviewer', jobs: [{ label: 'desloppify review', started_at: sec(3725) }] },
+    { name: 'scout', title: 'Scout', jobs: [] },
+  ],
+}
+const row = (name, extra = {}) => ({ name, ...extra })
+const derive = o => Object.fromEntries(deriveRows({ crew, roster: [], focusedProfile: null, busy: false, now: NOW, ...o }).map(r => [r.name, r]))
+
+test('plugin contract', () => {
+  assert.equal(plugin.id, 'crew-monitor')
+  assert.equal(typeof plugin.register, 'function')
+})
+
+test('fmtElapsed', () => {
+  assert.equal(fmtElapsed(5), '5s')
+  assert.equal(fmtElapsed(125), '2m 05s')
+  assert.equal(fmtElapsed(3725), '1h 02m')
+  assert.equal(fmtElapsed(null), '')
+})
+
+test('background job with no live turn: state job, elapsed recomputed from started_at', () => {
+  const r = derive({})
+  assert.equal(r.reviewer.state, 'job')
+  assert.equal(r.reviewer.jobs[0].elapsed, 3725)
+  assert.equal(r.foreman.state, 'idle')
+})
+
+test('focused busy turn is thinking and keeps its jobs', () => {
+  const r = derive({ focusedProfile: 'reviewer', busy: true })
+  assert.equal(r.reviewer.state, 'thinking')
+  assert.equal(r.reviewer.jobs.length, 1)
+  assert.equal(r.scout.state, 'idle')
+})
+
+test('busy flag for a different profile does not light this bot', () => {
+  assert.equal(derive({ focusedProfile: 'foreman', busy: true }).scout.state, 'idle')
+})
+
+test('write inside 90s is thinking, outside is not', () => {
+  const roster = [row('scout', { last_session: { last_active: sec(30) } }), row('foreman', { last_session: { last_active: sec(91) } })]
+  const r = derive({ roster })
+  assert.equal(r.scout.state, 'thinking')
+  assert.equal(r.foreman.state, 'idle')
+})
+
+test('worker heartbeat inside 150s is a job even with no registry entry', () => {
+  const r = derive({ roster: [row('scout', { worker_session: { last_active: sec(100) } })] })
+  assert.equal(r.scout.state, 'job')
+  assert.equal(r.scout.jobs[0].label, 'working in background')
+  assert.equal(derive({ roster: [row('scout', { worker_session: { last_active: sec(151) } })] }).scout.state, 'idle')
+})
+
+test('roster unreachable: idle bots read offline/unknown, bots with a job still show it', () => {
+  const r = deriveRows({ crew: null, roster: null, focusedProfile: null, busy: false, now: NOW })
+  assert.deepEqual(r, [])
+  const only = deriveRows({ crew: { bots: [{ name: 'x', title: 'X', jobs: [] }] }, roster: null, focusedProfile: null, busy: false, now: NOW })
+  assert.equal(only[0].state, 'offline')
+  const withJob = deriveRows({ crew, roster: null, focusedProfile: null, busy: false, now: NOW })
+  assert.equal(withJob.find(x => x.name === 'reviewer').state, 'job')
+})
+
+test('roster title and canonical session are used; sort puts busy first', () => {
+  const roster = [row('scout', { ui_meta: { 'hermes-bots': { title: 'Scout Prime' } }, canonical_session: { id: 'a', resolved_id: 'b' } })]
+  const rows = deriveRows({ crew, roster, focusedProfile: null, busy: false, now: NOW })
+  assert.equal(rows[0].name, 'reviewer')
+  const scout = rows.find(x => x.name === 'scout')
+  assert.equal(scout.title, 'Scout Prime')
+  assert.equal(scout.canonical.resolved_id, 'b')
+})
