@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import plugin, { rowCss, ago, deriveRows, fmtElapsed } from '../plugin.js'
+import plugin, { progressOf, rowCss, ago, deriveRows, fmtElapsed } from '../plugin.js'
 
 const NOW = 1_800_000_000_000
 const sec = n => NOW / 1000 - n
@@ -88,4 +88,22 @@ test('rowCss targets only busy bots by roster-key suffix, with bot colour', () =
   assert.ok(css.includes('[data-roster-key$="::reviewer"]{--crew-c:#DC143C;animation:crew-glow-core 2.6s'))
   assert.ok(css.includes('::foreman"]{--crew-c:#FFD700;animation:crew-glow-core 1.2s'))
   assert.ok(!css.includes('scout') && !css.includes('bad'))
+})
+
+test('progress: job progress beats kanban tasks; kanban shown when no job progress', () => {
+  assert.deepEqual(progressOf([{ progress: { done: 2, total: 20, unit: 'batches' } }], { done: 1, total: 4 }), { text: '2/20', what: 'batches' })
+  assert.deepEqual(progressOf([{}], { done: 3, total: 5 }), { text: '3/5', what: 'kanban tasks' })
+  assert.equal(progressOf([], null), null)
+})
+
+test('progress flows through deriveRows and rowCss adds a name badge, even for an idle bot', () => {
+  const c = { bots: [{ name: 'scout', title: 'Scout', jobs: [], tasks: { done: 3, total: 5 } }, { name: 'reviewer', title: 'Reviewer', jobs: [{ label: 'r', started_at: sec(5), progress: { done: 2, total: 20, unit: 'batches' } }] }] }
+  const rows = deriveRows({ crew: c, roster: [], focusedProfile: null, busy: false, now: NOW })
+  const scout = rows.find(x => x.name === 'scout')
+  assert.equal(scout.state, 'idle')
+  assert.equal(scout.progress.text, '3/5')
+  const css = rowCss(rows)
+  assert.ok(css.includes('::scout"] span.truncate.font-medium::after{content:"  3/5"') || css.includes('::scout"] span.truncate.font-medium::after{content:"  3/5";'))
+  assert.ok(css.includes('"  2/20"'))
+  assert.ok(!css.includes('::scout"]{--crew-c'), 'idle bot gets a badge but no pulse')
 })

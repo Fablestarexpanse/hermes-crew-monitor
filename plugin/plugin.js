@@ -55,7 +55,7 @@ export function ago(seconds) {
 export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
   const nowS = now / 1000
   const byName = new Map()
-  for (const b of (crew && crew.bots) || []) byName.set(b.name, { name: b.name, title: b.title, jobs: b.jobs || [] })
+  for (const b of (crew && crew.bots) || []) byName.set(b.name, { name: b.name, title: b.title, jobs: b.jobs || [], tasks: b.tasks })
   for (const r of roster || []) {
     if (!r || !r.name) continue
     const hit = byName.get(r.name) || { name: r.name, title: r.name, jobs: [] }
@@ -77,6 +77,7 @@ export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
       else if (!rosterKnown) state = 'offline' // cannot tell if it is thinking
       const jobs = b.jobs.map(j => ({
         label: j.label,
+        progress: j.progress,
         elapsed: j.started_at ? nowS - j.started_at : j.elapsed_s,
         startedAt: j.started_at,
         pid: j.pid,
@@ -85,9 +86,17 @@ export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
       }))
       // A worker heartbeat with no process-registry entry (kanban/tool worker) still deserves a line.
       if (!jobs.length && state === 'job') jobs.push({ label: 'working in background', elapsed: null })
-      return { name: b.name, title: b.title, state, jobs, lastWrite: lastWrite || null, canonical: row && row.canonical_session }
+      return { name: b.name, title: b.title, state, jobs, progress: progressOf(jobs, b.tasks), lastWrite: lastWrite || null, canonical: row && row.canonical_session }
     })
     .sort((a, c) => rank(a.state) - rank(c.state) || a.title.localeCompare(c.title))
+}
+
+// "3/5": a running job's own progress (desloppify batches) wins over open kanban tasks.
+export function progressOf(jobs, tasks) {
+  const j = jobs.find(x => x.progress && x.progress.total)
+  if (j) return { text: `${j.progress.done}/${j.progress.total}`, what: j.progress.unit || 'steps' }
+  if (tasks && tasks.total) return { text: `${tasks.done}/${tasks.total}`, what: 'kanban tasks' }
+  return null
 }
 
 const rank = s => ({ thinking: 0, job: 1, idle: 2, offline: 3 })[s]
@@ -169,6 +178,7 @@ function Hover({ bot, now }) {
     children: [
       jsxs('div', { children: [jsx('b', { children: bot.title }), jsx('span', { style: dim, children: ` · ${bot.name}` })] }),
       jsx('div', { style: dim, children: stateText }),
+      bot.progress ? jsx('div', { style: dim, children: `${bot.progress.text} ${bot.progress.what}` }) : null,
       bot.lastWrite ? jsx('div', { style: dim, children: `last wrote ${ago(now / 1000 - bot.lastWrite)}` }) : null,
       ...bot.jobs.map((j, i) =>
         jsxs('div', { className: 'crew-tip-job', children: [
@@ -205,6 +215,9 @@ function BotRow({ bot, now }) {
                 style: { color: dim ? 'var(--ui-text-tertiary)' : 'var(--ui-text-secondary)' },
                 children: bot.title,
               }),
+              bot.progress
+                ? jsx('span', { className: 'crew-progress', title: bot.progress.what, children: bot.progress.text })
+                : null,
               status
                 ? jsx('span', { className: 'crew-state', style: { color: 'var(--ui-text-tertiary)' }, children: status })
                 : null,
@@ -275,13 +288,20 @@ function StatusChip({ onToggle }) {
 // Core Bots list rows carry data-roster-key="<connection>::<profile>". Pure CSS keyed on that
 // attribute: no DOM observers, nothing to undo but removing the <style>.
 export function rowCss(rows) {
-  return rows
-    .filter(r => (r.state === 'thinking' || r.state === 'job') && /^[\w.-]+$/.test(r.name))
-    .map(r => {
-      const speed = r.state === 'thinking' ? '1.2s' : '2.6s'
-      return `[data-roster-key$="::${r.name}"]{--crew-c:${COLORS[r.name] || FALLBACK_COLOR};animation:crew-glow-core ${speed} ease-in-out infinite}`
-    })
-    .join('\n')
+  const out = []
+  for (const r of rows) {
+    if (!/^[\w.-]+$/.test(r.name)) continue
+    const row = `[data-roster-key$="::${r.name}"]`
+    const color = COLORS[r.name] || FALLBACK_COLOR
+    if (r.state === 'thinking' || r.state === 'job') {
+      out.push(`${row}{--crew-c:${color};animation:crew-glow-core ${r.state === 'thinking' ? '1.2s' : '2.6s'} ease-in-out infinite}`)
+    }
+    // text is digits and a slash by construction (progressOf), so it is safe inside a CSS string
+    if (r.progress && /^\d+\/\d+$/.test(r.progress.text)) {
+      out.push(`${row} span.truncate.font-medium::after{content:"  ${r.progress.text}";font-weight:400;font-size:.6875rem;color:${color}}`)
+    }
+  }
+  return out.join('\n')
 }
 
 const CSS = `
@@ -296,6 +316,7 @@ const CSS = `
 .crew-main{display:flex;flex-direction:column;min-width:0;flex:1}
 .crew-line{display:flex;gap:6px;align-items:baseline}
 .crew-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crew-progress{font-size:.6875rem;font-variant-numeric:tabular-nums;color:var(--crew-c)}
 .crew-state{font-size:.6875rem}
 .crew-job{display:flex;justify-content:space-between;gap:8px;font-size:.6875rem;line-height:1.35}
 .crew-job-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

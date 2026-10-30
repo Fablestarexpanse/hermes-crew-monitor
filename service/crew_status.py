@@ -15,6 +15,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -157,6 +159,53 @@ def list_bots(home: Path) -> list[dict]:
     return out
 
 
+def review_progress(command: str, cwd: Optional[str]) -> Optional[dict]:
+    """Desloppify batches finished / total, read from the run dir named in the local_review.py command.
+
+    A batch counts as done when results/batch-N.raw.txt exists (local_review.py renames invalid ones
+    to .rejected.txt and skips only valid ones on resume). Total = files in prompts/.
+    """
+    try:
+        argv = shlex.split(command.replace("\\", "/"), posix=True)
+        i = next(n for n, a in enumerate(argv) if a.endswith("local_review.py"))
+        run = Path(argv[i + 1])
+        if argv[i + 1].startswith("-"):
+            return None
+        if not run.is_absolute() and cwd:
+            run = Path(cwd) / run
+        total = sum(1 for _ in (run / "prompts").iterdir())
+        done = sum(1 for _ in (run / "results").glob("batch-*.raw.txt"))
+    except (StopIteration, IndexError, OSError, ValueError):
+        return None
+    return {"done": done, "total": total, "unit": "batches"} if total else None
+
+
+def kanban_progress(db: Path, now: float, window_s: int = 86400) -> dict:
+    """{assignee: {done, total}} for tasks that are open, or finished within the last day.
+
+    Only bots with something still open are reported (a fully finished board is not progress to watch).
+    Read-only, WAL-aware connection; any error means no data.
+    """
+    try:
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = con.execute(
+                "SELECT assignee, status, completed_at FROM tasks WHERE assignee IS NOT NULL AND status != 'archived'"
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    out: dict = {}
+    for who, status, completed in rows:
+        if status == "done" and not (completed and now - completed <= window_s):
+            continue
+        t = out.setdefault(who, {"done": 0, "total": 0})
+        t["total"] += 1
+        t["done"] += status == "done"
+    return {k: v for k, v in out.items() if v["done"] < v["total"]}
+
+
 _SESSION_OWNER = re.compile(r"agent:([^:]+):")
 
 
@@ -192,8 +241,10 @@ def collect_jobs(home: Path, names: list, now: float, probe: Probe = probe_pid) 
             started = e.get("started_at")
             started = float(started) if isinstance(started, (int, float)) else None
             cls = classify(str(e.get("command", "")))
+            progress = review_progress(str(e.get("command", "")), e.get("cwd")) if cls["kind"] == "review" else None
             out[job_owner(e, file_profile, cls["kind"], known)].append({
                 **cls,
+                "progress": progress,
                 "pid": e.get("pid"),
                 "session_id": e.get("session_id"),
                 "started_at": started,
@@ -247,7 +298,8 @@ def snapshot(home: Path = DEFAULT_HOME, now: Optional[float] = None, probe: Prob
     now = time.time() if now is None else now
     bots = list_bots(home)
     jobs = collect_jobs(home, [b["name"] for b in bots], now, probe)
-    bots = [{**b, "jobs": jobs[b["name"]]} for b in bots]
+    tasks = kanban_progress(home / "kanban.db", now)
+    bots = [{**b, "jobs": jobs[b["name"]], "tasks": tasks.get(b["name"])} for b in bots]
     return {"ts": now, "gpu": read_gpu(probe), "bots": bots}
 
 

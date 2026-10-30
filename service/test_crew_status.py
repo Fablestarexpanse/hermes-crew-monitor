@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -131,6 +132,49 @@ class Snapshot(unittest.TestCase):
         home = self.make_home({})
         (home / "profiles" / "scout" / "processes.json").write_text("{not json")
         self.assertEqual(cs.collect_jobs(home, ["scout"], NOW, lambda pid: cs.Proc(True)), {"scout": []})
+
+
+class Progress(unittest.TestCase):
+    def make_run(self, prompts, done, rejected=0):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name) / "run dir 1"  # a space, like the real "Game Projects" paths
+        (run / "prompts").mkdir(parents=True)
+        (run / "results").mkdir()
+        for n in range(1, prompts + 1):
+            (run / "prompts" / f"batch-{n}.md").write_text("x")
+        for n in range(1, done + 1):
+            (run / "results" / f"batch-{n}.raw.txt").write_text("x")
+        for n in range(done + 1, done + 1 + rejected):
+            (run / "results" / f"batch-{n}.rejected.txt").write_text("x")
+        return run
+
+    def test_review_batches_done_of_total_ignoring_rejected(self):
+        run = self.make_run(20, 3, rejected=1)
+        cmd = f'cd "{run.parent}" && "F:/py/python.exe" "F:/t/local_review.py" "{run}" --repo .'
+        self.assertEqual(cs.review_progress(cmd, str(run.parent)), {"done": 3, "total": 20, "unit": "batches"})
+
+    def test_review_progress_none_when_run_dir_missing_or_unparsable(self):
+        self.assertIsNone(cs.review_progress('python local_review.py "Z:/nope/run" --repo .', None))
+        self.assertIsNone(cs.review_progress("python other.py", None))
+        self.assertIsNone(cs.review_progress("python local_review.py --repo .", None))
+
+    def test_kanban_counts_open_and_recently_done_only(self):
+        with tempfile.TemporaryDirectory() as t:
+            db = Path(t) / "kanban.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT, completed_at INTEGER)")
+            rows = [("1", "scout", "done", NOW - 60), ("2", "scout", "done", NOW - 120), ("3", "scout", "running", None),
+                    ("4", "scout", "todo", None), ("5", "scout", "done", NOW - 10 * 86400),  # too old: ignored
+                    ("6", "scout", "archived", None), ("7", "foreman", "done", NOW - 5),  # all done: not reported
+                    ("8", None, "todo", None)]
+            con.executemany("INSERT INTO tasks VALUES (?,?,?,?)", rows)
+            con.commit()
+            con.close()
+            self.assertEqual(cs.kanban_progress(db, NOW), {"scout": {"done": 2, "total": 4}})
+
+    def test_kanban_missing_db_is_empty(self):
+        self.assertEqual(cs.kanban_progress(Path("Z:/nope/kanban.db"), NOW), {})
 
 
 class Gpu(unittest.TestCase):
