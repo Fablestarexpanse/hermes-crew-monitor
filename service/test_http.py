@@ -31,8 +31,9 @@ class CrewHttp(unittest.TestCase):
             (run / "results" / f"batch-{n}.raw.txt").write_text("x")
         # a job whose pid is this very process: alive, and its start time is read from the OS
         birth = cs.probe_pid(os.getpid()).birth
-        job = {"pid": os.getpid(), "pid_scope": "host", "host_start_time": round(birth * 100),
-               "started_at": time.time() - 90, "session_key": "agent:reviewer:local:dm:x",
+        job = {"pid": os.getpid(), "pid_scope": "host",
+               **({"host_start_time": round(birth * 100)} if birth is not None else {}),  # None off Windows
+               "started_at": time.time() - 90, "session_key": "agent:reviewer:local:dm:x", "cwd": "F:/t",
                "command": f'python "F:/t/local_review.py" "{run.as_posix()}" --repo .'}
         (home / "profiles" / "reviewer" / "processes.json").write_text(json.dumps([job]))
         con = sqlite3.connect(home / "kanban.db")
@@ -57,6 +58,8 @@ class CrewHttp(unittest.TestCase):
         bots = {b["name"]: b for b in json.load(res)["bots"]}
         job = bots["reviewer"]["jobs"][0]
         self.assertEqual(job["label"], "desloppify review")
+        self.assertEqual(job["cwd"], "F:/t")
+        self.assertIn("local_review.py", job["command"])
         self.assertEqual(job["progress"], {"done": 3, "total": 10, "unit": "batches"})
         self.assertEqual((bots["scout"]["tasks"]["done"], bots["scout"]["tasks"]["total"]), (3, 5))
         self.assertEqual([i["status"] for i in bots["scout"]["tasks"]["items"]], ["running", "todo"])

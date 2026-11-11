@@ -112,6 +112,14 @@ class Snapshot(unittest.TestCase):
         self.assertEqual([(j["label"], j["elapsed_s"]) for j in bots["foreman"]["jobs"]], [("GPU job (comfyui)", 125)])
         self.assertEqual(bots["scout"]["jobs"], [])
 
+    def test_hover_fields_cwd_and_capped_one_line_command(self):
+        job = {"pid": 1, "pid_scope": "host", "cwd": "F:/p", "command": "run\n  it " + "x" * 500, "started_at": NOW - 1}
+        home = self.make_home({"scout": [job]})
+        (j,) = cs.collect_jobs(home, ["scout"], NOW, lambda pid: cs.Proc(True))["scout"]
+        self.assertEqual(j["cwd"], "F:/p")
+        self.assertTrue(j["command"].startswith("run it x"))
+        self.assertEqual(len(j["command"]), cs.COMMAND_MAX)
+
     def test_job_in_another_profiles_file_goes_to_its_session_owner_once(self):
         review = {"pid": 5, "pid_scope": "host", "command": "python local_review.py x", "started_at": NOW - 60,
                   "session_key": "agent:reviewer:local:dm:abc"}

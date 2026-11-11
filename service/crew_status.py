@@ -35,6 +35,7 @@ GPU_LOCK = Path(r"F:\Hermes\tools\studio-control\logs\gpu_job_active.json")
 START_TOLERANCE_CS = 2
 # With no recorded host_start_time, a live pid born well after the job started is a reused pid.
 BIRTH_SLACK_S = 30
+COMMAND_MAX = 300
 
 
 # --- process identity -------------------------------------------------------------------------
@@ -243,12 +244,16 @@ def collect_jobs(home: Path, names: list, now: float, probe: Probe = probe_pid) 
             seen.add(ident)
             started = e.get("started_at")
             started = float(started) if isinstance(started, (int, float)) else None
-            cls = classify(str(e.get("command", "")))
-            progress = review_progress(str(e.get("command", "")), e.get("cwd")) if cls["kind"] == "review" else None
+            command, cwd = str(e.get("command") or ""), e.get("cwd")
+            cls = classify(command)
+            progress = review_progress(command, cwd) if cls["kind"] == "review" else None
             out[job_owner(e, file_profile, cls["kind"], known)].append({
                 **cls,
                 "progress": progress,
                 "pid": e.get("pid"),
+                # for the hover card; one line, capped (DM deliveries carry the whole message)
+                "cwd": cwd if isinstance(cwd, str) else None,
+                "command": " ".join(command.split())[:COMMAND_MAX] or None,
                 "session_id": e.get("session_id"),
                 "started_at": started,
                 "elapsed_s": max(0, int(now - started)) if started else None,
