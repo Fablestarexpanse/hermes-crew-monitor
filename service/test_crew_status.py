@@ -17,7 +17,7 @@ class Classify(unittest.TestCase):
     def test_dm_delivery_names_author(self):
         cmd = ('python "F:/x/tools/bot_mode_dm.py" --run-delivery --author '
                '{"id":"bot:foreman","name":"Foreman","is_bot":true} query-file dm.txt')
-        self.assertEqual(cs.classify(cmd), {"kind": "dm", "label": "receiving message from Foreman"})
+        self.assertEqual(cs.classify(cmd), {"kind": "dm", "label": "receiving message from Foreman", "from": "Foreman"})
 
     def test_dm_delivery_shell_escaped_author(self):
         cmd = r'python bot_mode_dm.py --run-delivery --author "{\"id\":\"u1\",\"name\":\"Brian\"}" file x'
@@ -34,6 +34,22 @@ class Classify(unittest.TestCase):
         self.assertEqual(cs.classify(r'"F:\a\local_review.py" run --repo .')["label"], "desloppify review")
         self.assertEqual(cs.classify("python tools/research.py q")["label"], "deep research")
         self.assertEqual(cs.classify("Unity.exe -runTests -testPlatform PlayMode unity test")["label"], "Unity tests")
+
+    def test_lookalike_names_are_not_the_known_tools(self):
+        for cmd in ("python my_research.py q", "python research.pyc", "python notes/unity/readme_test.py",
+                    "python old_local_review.py.bak x", "pytest tests/ --unity-build"):
+            self.assertEqual(cs.classify(cmd)["kind"], "other", cmd)
+        self.assertEqual(cs.classify("pwsh tools/run_unity_tests.ps1")["kind"], "unity")
+        self.assertEqual(cs.classify('"C:/Program Files/Unity/Editor/Unity.exe" -batchmode -runTests')["kind"], "unity")
+
+    def test_config_rules_win_and_can_use_capture_groups(self):
+        cfg = cs.parse_config({"rules": [{"match": r"blender(?:\.exe)?\s+-b\s+(\S+)", "kind": "render", "label": r"Blender render (\1)"},
+                                         {"match": "(", "label": "broken regex is skipped"}, {"label": "no match key"}],
+                               "colors": {"scout": "#00ff88", "bad": "red;}", "n": 5}, "stall_minutes": 2})
+        self.assertEqual(cs.classify("Blender.exe -b shot.blend -a", cfg.rules), {"kind": "render", "label": "Blender render (shot.blend)"})
+        self.assertEqual(cs.classify("python research.py q", cfg.rules)["kind"], "research")
+        self.assertEqual((cfg.colors, cfg.stall_s), ({"scout": "#00ff88"}, 120))
+        self.assertEqual(cs.parse_config(["nonsense"]), cs.Config())
 
     def test_gpu_job_app(self):
         self.assertEqual(cs.classify("python gpu_job.py --app comfyui -- x")["label"], "GPU job (comfyui)")
@@ -112,6 +128,14 @@ class Snapshot(unittest.TestCase):
         self.assertEqual([(j["label"], j["elapsed_s"]) for j in bots["foreman"]["jobs"]], [("GPU job (comfyui)", 125)])
         self.assertEqual(bots["scout"]["jobs"], [])
 
+    def test_hover_fields_cwd_and_capped_one_line_command(self):
+        job = {"pid": 1, "pid_scope": "host", "cwd": "F:/p", "command": "run\n  it " + "x" * 500, "started_at": NOW - 1}
+        home = self.make_home({"scout": [job]})
+        (j,) = cs.collect_jobs(home, ["scout"], NOW, lambda pid: cs.Proc(True))["scout"]
+        self.assertEqual(j["cwd"], "F:/p")
+        self.assertTrue(j["command"].startswith("run it x"))
+        self.assertEqual(len(j["command"]), cs.COMMAND_MAX)
+
     def test_job_in_another_profiles_file_goes_to_its_session_owner_once(self):
         review = {"pid": 5, "pid_scope": "host", "command": "python local_review.py x", "started_at": NOW - 60,
                   "session_key": "agent:reviewer:local:dm:abc"}
@@ -126,7 +150,9 @@ class Snapshot(unittest.TestCase):
         home = self.make_home({"reviewer": [dm]})
         jobs = cs.collect_jobs(home, ["foreman", "reviewer"], NOW, lambda pid: cs.Proc(True))
         self.assertEqual(jobs["foreman"], [])
-        self.assertEqual(jobs["reviewer"][0]["label"], "receiving message from Foreman")
+        self.assertEqual(jobs["reviewer"][0]["label"], "Foreman → reviewer")
+        titled = cs.collect_jobs(home, ["foreman", "reviewer"], NOW, lambda pid: cs.Proc(True), {"reviewer": "Reviewer"})
+        self.assertEqual(titled["reviewer"][0]["label"], "Foreman → Reviewer")
 
     def test_malformed_processes_json_is_empty(self):
         home = self.make_home({})
@@ -186,6 +212,154 @@ class Gpu(unittest.TestCase):
                          "held by gpu_job comfyui")
         self.assertEqual(cs.gpu_label(local, {"app": "comfyui"})["label"], "held by gpu_job comfyui")
         self.assertEqual(cs.gpu_label(None, None)["state"], "unknown")
+
+
+class Security(unittest.TestCase):
+    def test_host_must_be_loopback(self):
+        for ok in (None, "127.0.0.1:8094", "localhost:8094", "LOCALHOST", "[::1]:8094"):
+            self.assertTrue(cs.host_allowed(ok), ok)
+        for bad in ("evil.example:8094", "127.0.0.1.evil.example", "192.168.1.5:8094"):
+            self.assertFalse(cs.host_allowed(bad), bad)
+
+    def test_web_sites_cannot_read_app_shells_can(self):
+        for ok in (None, "null", "app://-", "tauri://localhost", "file://", "http://localhost:5173",
+                   "https://tauri.localhost", "http://127.0.0.1:3000"):
+            self.assertTrue(cs.origin_allowed(ok), ok)
+        for bad in ("https://evil.example", "http://localhost.evil.example", "https://127.0.0.1.evil.example"):
+            self.assertFalse(cs.origin_allowed(bad), bad)
+
+    def test_pinned_origins_are_exact(self):
+        allow = frozenset({"app://hermes"})
+        self.assertTrue(cs.origin_allowed("app://hermes", allow))
+        self.assertTrue(cs.origin_allowed(None, allow))
+        for bad in ("null", "app://other", "http://localhost:5173"):
+            self.assertFalse(cs.origin_allowed(bad, allow), bad)
+
+
+class GpuExtras(unittest.TestCase):
+    def test_nvidia_smi_parsed_largest_card_and_absent_is_none(self):
+        class R:
+            stdout = "3, 40, 900, 8192\n62, 71, 22016, 24564\n"
+        self.assertEqual(cs.read_nvidia(lambda *a, **k: R),
+                         {"util_pct": 62, "temp_c": 71, "vram_used_mib": 22016, "vram_total_mib": 24564})
+
+        def missing(*a, **k):
+            raise FileNotFoundError
+        self.assertIsNone(cs.read_nvidia(missing))
+        R.stdout = "[N/A], x\n"
+        self.assertIsNone(cs.read_nvidia(lambda *a, **k: R))
+
+    def test_summary_prefers_nvidia_numbers_over_the_ladder(self):
+        ladder = {"mode": "local", "ctx": 262144, "vram_used_mib": 100, "vram_total_mib": 24564}
+        g = cs.gpu_summary(ladder, None, {"util_pct": 9, "temp_c": 50, "vram_used_mib": 200, "vram_total_mib": 24564})
+        self.assertEqual((g["vram_used_mib"], g["util_pct"], g["temp_c"], g["state"]), (200, 9, 50, "local"))
+        self.assertEqual(cs.gpu_summary(ladder, None)["vram_used_mib"], 100)
+        self.assertIsNone(cs.gpu_summary(None, None)["vram_total_mib"])
+
+    def test_queue_is_every_gpu_job_but_the_lock_holder(self):
+        def bots():
+            job = lambda pid, app, t: {"kind": "gpu", "pid": pid, "app": app, "label": f"GPU job ({app})", "started_at": t}
+            return [{"name": "asset-bot", "title": "Asset Bot", "jobs": [job(10, "comfyui", 1), job(11, "blender", 2)]},
+                    {"name": "trailer-bot", "title": "Trailer Bot", "jobs": [job(12, "comfyui", 3), {"kind": "other", "pid": 13, "started_at": 4}]}]
+        b = bots()
+        q = cs.gpu_queue(b, {"lock": {"pid": 10, "app": "comfyui"}})
+        self.assertEqual([(x["title"], x["label"]) for x in q], [("Asset Bot", "GPU job (blender)"), ("Trailer Bot", "GPU job (comfyui)")])
+        self.assertNotIn("waiting_gpu", b[0]["jobs"][0])
+        self.assertTrue(b[1]["jobs"][0]["waiting_gpu"])
+        # lock pid is not a registry pid (wrapper shell): the oldest job for that app is the holder
+        self.assertEqual([x["label"] for x in cs.gpu_queue(bots(), {"lock": {"pid": 999, "app": "comfyui"}})],
+                         ["GPU job (blender)", "GPU job (comfyui)"])
+        self.assertEqual(cs.gpu_queue(bots(), {"lock": None}), [])
+        self.assertEqual(cs.gpu_queue(bots(), {"lock": {"pid": 999, "app": "krita"}}), [])  # holder unknown: no guess
+
+
+class MonitorTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        d = self.home / "profiles" / "reviewer"
+        d.mkdir(parents=True)
+        (d / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Reviewer\n")
+        self.run_dir = self.home / "run"
+        (self.run_dir / "prompts").mkdir(parents=True)
+        (self.run_dir / "results").mkdir()
+        for n in range(10):
+            (self.run_dir / "prompts" / f"batch-{n}.md").write_text("x")
+        self.now, self.alive = NOW, {5}
+        self.mon = cs.Monitor(self.home, probe=lambda pid: cs.Proc(pid in self.alive), clock=lambda: self.now)
+        self.write_jobs([{"pid": 5, "pid_scope": "host", "started_at": NOW - 100,
+                          "command": f'python local_review.py "{self.run_dir.as_posix()}"'}])
+
+    def write_jobs(self, jobs):
+        (self.home / "profiles" / "reviewer" / "processes.json").write_text(json.dumps(jobs))
+
+    def tick(self, seconds, batches=None):
+        self.now += seconds
+        if batches is not None:
+            for n in range(batches):
+                (self.run_dir / "results" / f"batch-{n}.raw.txt").write_text("x")
+        return self.mon.refresh()
+
+    def job(self, snap):
+        return snap["bots"][0]["jobs"][0]
+
+    def test_eta_from_the_observed_rate_and_fixed_between_changes(self):
+        p = self.job(self.tick(0, batches=2))["progress"]
+        self.assertEqual((p["done"], p["eta_at"], p["stalled"]), (2, None, False))  # resumed run: no rate yet
+        p = self.job(self.tick(60, batches=4))["progress"]  # 2 batches a minute, 6 left
+        self.assertEqual(p["eta_at"], round(self.now + 180))
+        later = self.job(self.tick(30))["progress"]
+        self.assertEqual((later["eta_at"], later["changed_at"]), (p["eta_at"], p["changed_at"]))
+
+    def test_stalled_after_no_progress_for_the_configured_time_then_recovers(self):
+        self.tick(0, batches=1)
+        self.assertFalse(self.job(self.tick(cs.DEFAULT_STALL_S - 1))["progress"]["stalled"])
+        self.assertTrue(self.job(self.tick(1))["progress"]["stalled"])
+        self.assertFalse(self.job(self.tick(5, batches=2))["progress"]["stalled"])
+
+    def test_finished_job_is_recorded_once_with_its_duration(self):
+        self.tick(0)
+        self.alive.clear()
+        snap = self.tick(20)
+        self.assertEqual(snap["bots"][0]["jobs"], [])
+        (f,) = snap["finished"]
+        self.assertEqual((f["title"], f["label"], f["duration_s"], f["ended_at"]), ("Reviewer", "desloppify review", 120, round(self.now)))
+        self.assertEqual(len(self.tick(5)["finished"]), 1)
+
+    def test_entry_missing_from_the_file_but_pid_alive_is_not_finished(self):
+        self.tick(0)
+        self.write_jobs([])  # e.g. read mid-write, or pruned by Hermes while the process runs on
+        self.assertEqual(self.tick(2)["finished"], [])
+        self.alive.clear()
+        self.assertEqual(len(self.tick(2)["finished"]), 1)
+
+    def test_cache_and_change_sequence(self):
+        a = self.mon.get()
+        self.assertIs(self.mon.get(), a)  # inside max_age: no re-read
+        seq, _ = self.mon.wait(-1, 0)
+        self.tick(5)  # only elapsed time moved: same payload version
+        self.assertEqual(self.mon.wait(seq, 0)[0], seq)
+        self.tick(5, batches=1)
+        self.assertEqual(self.mon.wait(seq, 0)[0], seq + 1)
+        self.assertNotIn("entry", self.job(self.mon.get(0)))
+
+    def test_config_file_colours_reach_the_payload_and_reload(self):
+        cfg = self.home / "crew-monitor.json"
+        cfg.write_text(json.dumps({"colors": {"reviewer": "#123456"}}))
+        mon = cs.Monitor(self.home, probe=lambda pid: cs.Proc(False), config=cs.ConfigFile(cfg), clock=lambda: self.now)
+        self.assertEqual(mon.refresh()["bots"][0]["color"], "#123456")
+        cfg.unlink()
+        self.assertIsNone(mon.refresh()["bots"][0]["color"])
+
+    def test_kanban_blocked_first_and_counted(self):
+        con = sqlite3.connect(self.home / "kanban.db")
+        con.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT, completed_at INTEGER, title TEXT, created_at INTEGER)")
+        con.executemany("INSERT INTO tasks VALUES (?,?,?,?,?,?)", [("1", "reviewer", "todo", None, "a", 1), ("2", "reviewer", "blocked", None, "b", 2)])
+        con.commit()
+        con.close()
+        t = self.tick(0)["bots"][0]["tasks"]
+        self.assertEqual((t["blocked"], [i["title"] for i in t["items"]]), (1, ["b", "a"]))
 
 
 if __name__ == "__main__":

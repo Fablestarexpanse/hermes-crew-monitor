@@ -62,21 +62,29 @@ const bots = [
   ['senior-dev', 'Senior Dev', 'Unity tests running', '#4169E1'],
   ['asset-bot', 'Asset Bot', 'GPU job queued for comfyui', '#E8661E'],
   ['design-partner', 'Design Partner', 'Palette approved', '#4169E1'],
+  ['trailer-bot', 'Trailer Bot', 'Waiting for the GPU', '#E8661E'],
   ['librarian', 'Librarian', 'Filed 14 notes', '#9AA0A6'],
 ]
 const jobs = {
-  reviewer: [{ label: 'desloppify review', started_at: now - 3725, pid: 48500, cwd: 'F:\\Game Projects\\Demo', command: 'python local_review.py "F:/Game Projects/Demo/.desloppify/runs/2026" --repo .', progress: { done: 7, total: 20, unit: 'batches' } }],
+  reviewer: [{ label: 'desloppify review', started_at: now - 3725, pid: 48500, cwd: 'F:\\Game Projects\\Demo', command: 'python local_review.py "F:/Game Projects/Demo/.desloppify/runs/2026" --repo .', progress: { done: 7, total: 20, unit: 'batches', eta_at: now + 42 * 60, changed_at: now - 200, stalled: false } }],
   researcher: [{ label: 'deep research', started_at: now - 1500, pid: 20412, cwd: 'F:\\Research', command: 'python research.py "shader LOD costs"' }],
   'senior-dev': [{ label: 'Unity tests', started_at: now - 740, pid: 31188, cwd: 'F:\\Game Projects\\Demo', command: 'Unity.exe -runTests -testPlatform PlayMode' }],
+  'trailer-bot': [{ id: '9', kind: 'gpu', label: 'GPU job (blender)', started_at: now - 95, pid: 10844, waiting_gpu: true, cwd: 'F:\\Hermes\\tools', command: 'python gpu_job.py --app blender -- trailer.blend' }],
   'asset-bot': [{ label: 'GPU job (comfyui)', started_at: now - 245, pid: 9920, cwd: 'F:\\Hermes\\tools', command: 'python gpu_job.py --app comfyui -- render.json' }],
 }
 const crew = {
-  gpu: { state: 'held', label: 'held by gpu_job comfyui' },
+  api: 2, version: '0.2.0', ts: now,
+  gpu: { state: 'held', label: 'held by gpu_job comfyui', vram_used_mib: 21300, vram_total_mib: 24564, util_pct: 97, temp_c: 71, queue: [{ bot: 'trailer-bot', title: 'Trailer Bot', label: 'GPU job (blender)' }] },
+  finished: [
+    { id: 'f1', bot: 'senior-dev', title: 'Senior Dev', kind: 'other', label: 'build player', started_at: now - 1100, ended_at: now - 240, duration_s: 860 },
+    { id: 'f2', bot: 'researcher', title: 'Researcher', kind: 'research', label: 'deep research', started_at: now - 9000, ended_at: now - 4300, duration_s: 4700 },
+  ],
   bots: bots.map(([name, title]) => ({
     name, title, jobs: jobs[name] || [],
-    tasks: name === 'scout' ? { done: 3, total: 5, items: [{ status: 'running', title: 'Write the shader brief' }, { status: 'todo', title: 'Send brief to Foreman' }] } : null,
+    tasks: name === 'scout' ? { done: 3, total: 6, blocked: 1, items: [{ status: 'blocked', title: 'Get art sign-off on the palette' }, { status: 'running', title: 'Write the shader brief' }, { status: 'todo', title: 'Send brief to Foreman' }] } : null,
   })),
 }
+window.EventSource = undefined // no service here: the plugin falls back to polling the stubbed fetch
 const realFetch = window.fetch
 window.fetch = (url, opts) => String(url).includes(':8094')
   ? Promise.resolve(new Response(JSON.stringify(crew), { status: 200 }))

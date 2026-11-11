@@ -41,7 +41,29 @@ Ladder status JSON at :8093 (`mode` local/cloud/held, `ctx`, `vram_*_mib`, `held
 `studio-control/logs/gpu_job_active.json` (`pid`, `app`) counts only while its pid is alive.
 A live lock beats the ladder's own mode.
 
+## Service hardening (v0.2)
+- `Access-Control-Allow-Origin: *` let any web page read bot names, task titles and command lines.
+  Now: `Origin` is echoed only when allowed (ordinary http(s) sites are refused with 403), and `Host`
+  must be loopback. Desktop's renderer origin is not known from here, so non-web origins are allowed
+  by default and `--allow-origin` pins it; `/health` lists the origins seen.
+- OpenProcess "access denied" used to count as alive. A job Hermes starts as this user can always be
+  opened with PROCESS_QUERY_LIMITED_INFORMATION, so denied means a recycled pid (a protected process):
+  now hidden. This differs from Hermes' `_host_pid_is_ours` on purpose.
+- The ladder call (1 s timeout when it is down) and `nvidia-smi` run on their own thread; `/crew`
+  serves a snapshot cached for 1 s. A worker refreshes every 2 s while someone is watching and every
+  10 s otherwise, which is what lets it notice jobs finishing with Desktop closed.
+- `/events` pushes the payload when it changes. Fields that tick (ts, elapsed) are left out of the
+  comparison, and the estimate is an absolute time fixed at the last progress change, for that reason.
+- A job that vanishes from processes.json is re-probed before it is called finished: the file can be
+  read mid-write, and Hermes can prune an entry while the process runs on.
+- The plugin keeps the last payload until 3 reads in a row fail, so one slow read no longer blanks it.
+- Windows: `allow_reuse_address` is off, otherwise a second service binds the same port silently.
+
 ## Not done / limits
 - Plugin UI was exercised only through pure-logic tests with a stubbed SDK; real rendering needs
   Hermes Desktop restarted (see README).
-- Colour dots use the fixed per-bot colours from the brief; everything else uses `--ui-*` variables.
+- Colour dots use the per-bot colours from the brief unless `crew-monitor.json` overrides them; amber
+  (#E8A317) marks things needing attention; everything else uses `--ui-*` variables.
+- v0.2 was tested on Linux only (unit tests, the service process over HTTP, the demo page in a
+  browser). Not yet run: `install.ps1`, the ctypes probe change, `nvidia-smi` on Windows, and the
+  plugin inside Hermes Desktop (EventSource from its renderer, `host.notify` toasts).
