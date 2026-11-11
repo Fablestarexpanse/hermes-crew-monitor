@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import plugin, { progressOf, rowCss, ago, deriveRows, fmtElapsed } from '../plugin.js'
+import plugin, { progressOf, rowCss, ago, deriveRows, fmtElapsed, fmtEta, waitingOf, crewEvents, finishedView, gpuView, chipSummary } from '../plugin.js'
 
 const NOW = 1_800_000_000_000
 const sec = n => NOW / 1000 - n
@@ -108,4 +108,78 @@ test('progress flows through deriveRows and rowCss adds a name badge, even for a
   assert.ok(css.includes('::scout"] span.truncate.font-medium::after{content:"  tasks 3/5 60%";'))
   assert.ok(css.includes('content:"  2/20 10%";'))
   assert.ok(!css.includes('::scout"]{--crew-c'), 'idle bot gets a badge but no pulse')
+})
+
+test('fmtEta', () => {
+  assert.equal(fmtEta(null, 0), '')
+  assert.equal(fmtEta(1000 + 30, 1000), '<1m left')
+  assert.equal(fmtEta(1000 + 42 * 60, 1000), '~42m left')
+  assert.equal(fmtEta(1000 + 3725, 1000), '~1h 02m left')
+  assert.equal(fmtEta(900, 1000), 'overdue')
+})
+
+test('waiting for you: recognised spellings only, and it outranks thinking', () => {
+  assert.equal(waitingOf(null), false)
+  assert.equal(waitingOf({ name: 'x', last_session: { last_active: 1, status: 'running' } }), false)
+  assert.equal(waitingOf({ pending_approvals: [] }), false)
+  assert.equal(waitingOf({ pending_approvals: [{}] }), true)
+  assert.equal(waitingOf({ last_session: { status: 'awaiting_approval' } }), true)
+  assert.equal(waitingOf({ canonical_session: { state: 'waiting for user' } }), true)
+  const rows = deriveRows({ crew, roster: [row('scout', { needs_input: true, last_session: { last_active: sec(5) } })], focusedProfile: null, busy: false, now: NOW })
+  assert.deepEqual([rows[0].name, rows[0].state], ['scout', 'waiting'])
+  assert.ok(rowCss(rows).includes('::scout"]{--crew-c:#E8A317;animation:crew-glow-core 1.2s'))
+})
+
+test('service colour overrides the built-in one; a bad value does not reach CSS', () => {
+  const c = { bots: [{ name: 'scout', title: 'Scout', color: '#00ff88', jobs: [{ label: 'x', started_at: sec(1) }] }, { name: 'foreman', title: 'F', color: 'red;}body{', jobs: [{ label: 'x', started_at: sec(1) }] }] }
+  const rows = deriveRows({ crew: c, roster: [], focusedProfile: null, busy: false, now: NOW })
+  assert.equal(rows.find(r => r.name === 'scout').color, '#00ff88')
+  assert.equal(rows.find(r => r.name === 'foreman').color, '#FFD700')
+  assert.ok(!rowCss([{ name: 'scout', state: 'job', color: 'red;}body{' }]).includes('body'))
+})
+
+test('eta, stall, GPU wait and blocked tasks flow through deriveRows', () => {
+  const job = { id: '5:1', label: 'desloppify review', started_at: sec(600), waiting_gpu: true, progress: { done: 4, total: 10, unit: 'batches', eta_at: sec(-1800), changed_at: sec(1200), stalled: true } }
+  const c = { bots: [{ name: 'reviewer', title: 'Reviewer', jobs: [job], tasks: { done: 0, total: 2, blocked: 1, items: [{ status: 'blocked', title: 'b' }] } }] }
+  const [r] = deriveRows({ crew: c, roster: [], focusedProfile: null, busy: false, now: NOW })
+  assert.equal(r.stalled, true)
+  assert.deepEqual([r.jobs[0].stalledFor, r.jobs[0].waitingGpu, r.jobs[0].id], [1200, true, '5:1'])
+  assert.equal(r.progress.batches.eta, '~30m left')
+  assert.equal(r.progress.tasks.blocked, 1)
+  assert.equal(r.progress.badge, '4/10 40% · tasks 0/2 0%') // the badge that goes into CSS stays plain
+  assert.equal(chipSummary([r]), 'Reviewer: desloppify review (stalled)')
+  assert.equal(chipSummary([]), 'Crew Monitor: everyone is idle')
+})
+
+test('crewEvents: first payload is quiet, then finished and stalled are each said once', () => {
+  const seen = new Set()
+  const fin = { id: '5:1', kind: 'review', title: 'Reviewer', label: 'desloppify review', duration_s: 3725, ended_at: 100 }
+  const dm = { id: '6:1', kind: 'dm', title: 'Scout', label: 'Foreman → Scout', duration_s: 4, ended_at: 101 }
+  assert.deepEqual(crewEvents({ finished: [fin] }, seen, true), [])
+  assert.deepEqual(crewEvents({ finished: [fin] }, seen, false), [], 'already known from the first payload')
+  const next = { ...fin, id: '7:1', ended_at: 200 }
+  assert.deepEqual(crewEvents({ finished: [next, dm, fin] }, seen, false), ['Reviewer finished desloppify review after 1h 02m'])
+  assert.deepEqual(crewEvents({ finished: [next, dm, fin] }, seen, false), [])
+  const stalled = { ts: 2000, bots: [{ title: 'Reviewer', jobs: [{ id: '8:1', label: 'desloppify review', progress: { stalled: true, changed_at: 1100 } }] }] }
+  assert.deepEqual(crewEvents(stalled, seen, false), ['Reviewer: desloppify review has made no progress for 15m 00s'])
+  assert.deepEqual(crewEvents(stalled, seen, false), [])
+  crewEvents({ ts: 2100, bots: [{ title: 'Reviewer', jobs: [{ id: '8:1', label: 'x', progress: { stalled: false } }] }] }, seen, false)
+  assert.equal(crewEvents(stalled, seen, false).length, 1, 'stalling again after recovering is news')
+})
+
+test('finishedView: newest first, capped, no DM deliveries', () => {
+  const f = (id, kind, ended) => ({ id, kind, bot: 'scout', title: 'Scout', label: `job ${id}`, duration_s: 125, ended_at: ended })
+  const v = finishedView({ finished: [f('c', 'other', 990), f('b', 'dm', 980), f('a', 'review', 400)] }, 1000, 5)
+  assert.deepEqual(v.map(x => [x.text, x.when]), [['Scout · job c', '2m 05s · 10s ago'], ['Scout · job a', '2m 05s · 10m 00s ago']])
+  assert.equal(finishedView({ finished: [f('c', 'other', 990), f('a', 'review', 400)] }, 1000, 1).length, 1)
+  assert.deepEqual(finishedView(null, 1000), [])
+})
+
+test('gpuView: bar fraction, stats line without repeating the label, queue', () => {
+  const g = gpuView({ label: 'held by gpu_job comfyui', vram_used_mib: 22016, vram_total_mib: 24564, util_pct: 62, temp_c: 71, queue: [{ title: 'Asset Bot' }, { title: 'Trailer Bot' }] })
+  assert.equal(g.frac.toFixed(3), '0.896')
+  assert.equal(g.meta, 'VRAM 21.5/24.0 GB · 62% util · 71°C')
+  assert.equal(g.queue, 'waiting for GPU: Asset Bot, Trailer Bot')
+  assert.equal(gpuView({ label: 'Ladder 256K local · 21.5/24.0 GB', vram_used_mib: 22016, vram_total_mib: 24564 }).meta, '')
+  assert.deepEqual(gpuView({ label: 'Ladder unreachable' }), { frac: null, meta: '', queue: '' })
 })
