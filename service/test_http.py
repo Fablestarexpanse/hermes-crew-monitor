@@ -31,8 +31,10 @@ class CrewHttp(unittest.TestCase):
             (run / "results" / f"batch-{n}.raw.txt").write_text("x")
         # a job whose pid is this very process: alive, and its start time is read from the OS
         birth = cs.probe_pid(os.getpid()).birth
-        job = {"pid": os.getpid(), "pid_scope": "host",
-               **({"host_start_time": round(birth * 100)} if birth is not None else {}),  # None off Windows
+        me = cs.probe_pid(os.getpid())
+        # what Hermes itself records for this pid: kernel ticks on Linux, centiseconds on Windows
+        stamp = me.ticks if me.ticks is not None else round(birth * 100) if birth is not None else None
+        job = {"pid": os.getpid(), "pid_scope": "host", **({"host_start_time": stamp} if stamp is not None else {}),
                "started_at": time.time() - 90, "session_key": "agent:reviewer:local:dm:x", "cwd": "F:/t",
                "command": f'python "F:/t/local_review.py" "{run.as_posix()}" --repo .'}
         (home / "profiles" / "reviewer" / "processes.json").write_text(json.dumps([job]))

@@ -43,8 +43,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
 
-# The Hermes data folder (the one holding profiles/): $HERMES_HOME, else Hermes' own default ~/.hermes.
-DEFAULT_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+def default_home(environ=os.environ, platform: str = sys.platform, user_home: Callable[[], Path] = Path.home) -> Path:
+    """The Hermes data folder (the one holding profiles/), resolved the way Hermes does
+    (hermes_constants.py): $HERMES_HOME, else %LOCALAPPDATA%\\hermes on Windows, ~/.hermes elsewhere."""
+    explicit = (environ.get("HERMES_HOME") or "").strip()
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    if platform == "win32":
+        local = (environ.get("LOCALAPPDATA") or "").strip()
+        return (Path(local) if local else user_home() / "AppData" / "Local") / "hermes"
+    return user_home() / ".hermes"
+
+
+DEFAULT_HOME = default_home()
 DEFAULT_PORT = 8094
 LADDER_URL = "http://127.0.0.1:8093/"
 VERSION = "0.3.0"
@@ -77,6 +88,7 @@ DEFAULT_STALL_S = 15 * 60
 class Proc:
     alive: bool
     birth: Optional[float] = None  # epoch seconds; None when unreadable
+    ticks: Optional[int] = None  # Linux: /proc/<pid>/stat field 22, the value Hermes records there
 
 
 Probe = Callable[[int], Proc]
@@ -85,12 +97,15 @@ _K32 = None
 
 def probe_pid(pid: int) -> Proc:
     """Windows: alive = exit code STILL_ACTIVE; birth = GetProcessTimes creation time."""
-    if os.name != "nt":  # dev/test hosts only; Hermes here is Windows
+    if os.name != "nt":
         try:
             os.kill(pid, 0)
-            return Proc(True, None)
+        except PermissionError:
+            pass  # exists, owned by someone else
         except OSError:
             return Proc(False)
+        ticks = _linux_start_ticks(pid)
+        return Proc(True, _linux_birth(ticks), ticks)  # no /proc (macOS): alive, identity unreadable
     import ctypes
     from ctypes import wintypes
 
@@ -121,6 +136,26 @@ def probe_pid(pid: int) -> Proc:
         k32.CloseHandle(h)
 
 
+def _linux_start_ticks(pid: int) -> Optional[int]:
+    """Field 22 of /proc/<pid>/stat, read exactly as gateway/status.py does."""
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _linux_birth(ticks: Optional[int]) -> Optional[float]:
+    if ticks is None:
+        return None
+    try:
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def job_is_live(entry: dict, probe: Probe = probe_pid) -> bool:
     """True only if the pid is alive AND is the process the registry recorded.
 
@@ -133,10 +168,12 @@ def job_is_live(entry: dict, probe: Probe = probe_pid) -> bool:
     proc = probe(pid)
     if not proc.alive:
         return False
+    expected = entry.get("host_start_time")
+    if proc.ticks is not None and isinstance(expected, int):
+        return proc.ticks == expected  # Linux: Hermes stored these same kernel ticks
     if proc.birth is None:
         return True  # alive, identity unreadable: same degrade as Hermes
-    expected = entry.get("host_start_time")
-    if isinstance(expected, int):
+    if isinstance(expected, int) and proc.ticks is None:
         return abs(round(proc.birth * 100) - expected) <= START_TOLERANCE_CS
     started = entry.get("started_at")
     if isinstance(started, (int, float)):
@@ -203,20 +240,37 @@ def parse_title(profile_yaml: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+_DISPLAY_NAME = re.compile(r"^display_name:\s*['\"]?(.+?)['\"]?\s*$", re.M)
+
+
+def _profile_title(py: Path, name: str) -> str:
+    try:
+        text = py.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    m = _DISPLAY_NAME.search(text)
+    return parse_title(text) or (m.group(1) if m else None) or name.replace("-", " ").title()
+
+
+def profile_dir(home: Path, name: str) -> Path:
+    """Where a profile keeps its files. The default profile IS the home folder."""
+    return home if name == "default" else home / "profiles" / name
+
+
 def list_bots(home: Path) -> list[dict]:
     out = []
+    # Hermes' default profile lives in the home folder itself. Listed once it has run something
+    # or been given a profile.yaml, so a home that only uses named profiles gets no empty row.
+    if (home / "processes.json").is_file() or (home / "profile.yaml").is_file():
+        out.append({"name": "default", "title": _profile_title(home / "profile.yaml", "default")})
     root = home / "profiles"
     if not root.is_dir():
         return out
     for d in sorted(root.iterdir()):
         py = d / "profile.yaml"
-        if not d.is_dir() or not py.is_file():
+        if not d.is_dir() or not py.is_file() or d.name == "default":
             continue
-        try:
-            title = parse_title(py.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            title = None
-        out.append({"name": d.name, "title": title or d.name.replace("-", " ").title()})
+        out.append({"name": d.name, "title": _profile_title(py, d.name)})
     return out
 
 
@@ -300,7 +354,7 @@ def collect_jobs(home: Path, names: list, now: float, probe: Probe = probe_pid,
     titles = titles or {}
     for file_profile in names:
         try:
-            raw = json.loads((home / "profiles" / file_profile / "processes.json").read_text(encoding="utf-8"))
+            raw = json.loads((profile_dir(home, file_profile) / "processes.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         for e in raw if isinstance(raw, list) else []:
@@ -1097,7 +1151,8 @@ class Server(ThreadingHTTPServer):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--home", type=Path, default=DEFAULT_HOME,
-                    help="Hermes data folder, the one containing profiles/ (default: $HERMES_HOME or ~/.hermes)")
+                    help="Hermes data folder, the one containing profiles/ (default: $HERMES_HOME, else Hermes' own "
+                         "default: %%LOCALAPPDATA%%\\hermes on Windows, ~/.hermes elsewhere)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--log", type=Path, help="rotating log file (pythonw has no console)")
     ap.add_argument("--config", type=Path, default=Path(__file__).with_name("crew-monitor.json"),

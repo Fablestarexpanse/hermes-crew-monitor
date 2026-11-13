@@ -99,7 +99,8 @@ export function deriveRows({ crew, roster, focusedProfile, busy, now }) {
     if (!r || !r.name) continue
     const hit = byName.get(r.name) || { name: r.name, title: r.name, jobs: [] }
     const metaTitle = r.ui_meta && r.ui_meta['hermes-bots'] && r.ui_meta['hermes-bots'].title
-    byName.set(r.name, { ...hit, title: metaTitle || hit.title, row: r })
+    // the service has already resolved a title for bots it knows; a roster-only bot uses its display name
+    byName.set(r.name, { ...hit, title: metaTitle || (byName.has(r.name) ? hit.title : r.display_name || hit.title), row: r })
   }
   const rosterKnown = Array.isArray(roster)
   return [...byName.values()]
@@ -175,20 +176,20 @@ const isBusy = r => r.state === 'waiting' || r.state === 'thinking' || r.state =
  */
 export function crewEvents(crew, seen, quiet) {
   const out = []
-  const say = (key, text) => {
+  const say = (key, text, kind) => {
     if (seen.has(key)) return
     seen.add(key)
-    if (!quiet) out.push(text)
+    if (!quiet) out.push({ text, kind })
   }
   for (const f of crew.finished || []) {
-    if (f.kind !== 'dm') say(`f:${f.id}:${f.ended_at}`, `${f.title} finished ${f.label} after ${fmtElapsed(f.duration_s)}`)
+    if (f.kind !== 'dm') say(`f:${f.id}:${f.ended_at}`, `${f.title} finished ${f.label} after ${fmtElapsed(f.duration_s)}`, 'success')
   }
   const stalled = new Set()
   for (const b of crew.bots || []) {
     for (const j of b.jobs || []) {
       if (!j.progress || !j.progress.stalled) continue
       stalled.add(`s:${j.id}`)
-      say(`s:${j.id}`, `${b.title}: ${j.label} has made no progress for ${fmtElapsed(crew.ts - j.progress.changed_at)}`)
+      say(`s:${j.id}`, `${b.title}: ${j.label} has made no progress for ${fmtElapsed(crew.ts - j.progress.changed_at)}`, 'warning')
     }
   }
   for (const k of [...seen]) if (k.startsWith('s:') && !stalled.has(k)) seen.delete(k) // may stall again later
@@ -266,8 +267,20 @@ const focusedProfile = () => {
   return a ? a.get() : null
 }
 
-function say(message) {
-  if (notifyOn) host.notify({ kind: 'info', message })
+let osNotify = null // ctx.os.notify where the app has it: a native notification while Hermes is in the background
+
+// kind: 'success' (a job finished) | 'warning' (stalled, waiting for you). The toast shows in the app;
+// the native notification only fires while the user is away, and follows their Notifications setting.
+function say(message, kind = 'info') {
+  if (!notifyOn) return
+  host.notify({ kind, message })
+  if (osNotify) {
+    try {
+      Promise.resolve(osNotify({ title: 'Crew Monitor', body: message })).catch(() => {})
+    } catch {
+      // an older app without this door
+    }
+  }
 }
 
 function recompute() {
@@ -280,7 +293,7 @@ function recompute() {
   }
   if ($roster.get()) {
     const waiting = new Set(rows.filter(r => r.state === 'waiting').map(r => r.name))
-    if (waitingNames) for (const r of rows) if (waiting.has(r.name) && !waitingNames.has(r.name)) say(`${r.title} is waiting for you`)
+    if (waitingNames) for (const r of rows) if (waiting.has(r.name) && !waitingNames.has(r.name)) say(`${r.title} is waiting for you`, 'warning')
     waitingNames = waiting
   }
 }
@@ -290,7 +303,7 @@ function acceptCrew(data) {
   eventsPrimed = true
   $crew.set(data)
   recompute()
-  news.forEach(say)
+  news.forEach(n => say(n.text, n.kind))
 }
 
 async function fetchCrew() {
@@ -708,6 +721,7 @@ export default {
   register(ctx) {
     open = ctx.storage.get('open', true)
     notifyOn = ctx.storage.get('notify', true)
+    osNotify = ctx.os && typeof ctx.os.notify === 'function' ? ctx.os.notify.bind(ctx.os) : null
     $hideIdle.set(ctx.storage.get('hideIdle', false))
     const style = document.createElement('style')
     style.id = STYLE_ID

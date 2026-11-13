@@ -22,7 +22,8 @@ This installer is for Windows 10/11. On macOS or Linux, stop and tell the user t
 ## Step 1: find the Hermes data folder
 It is the folder that contains the `profiles` directory (and usually `config.yaml`).
 - If you are running inside Hermes, it is your own home: the environment variable `HERMES_HOME`
-  when set, otherwise the folder your `profiles` directory lives in.
+  when set, otherwise Hermes' default (`%LOCALAPPDATA%\hermes` on Windows). If you run under a named
+  profile, your `HERMES_HOME` is `<data folder>\profiles\<you>`: use the folder two levels up.
 - Check: `Test-Path "<folder>\profiles"` must be `True`.
 
 If you cannot determine it, run Step 2 without `-HermesHome`: the installer searches the usual places
@@ -57,7 +58,7 @@ and tell them it is on.
 Success is exit code 0 and output ending like this:
 ```
 Crew Monitor service 0.3.0 OK: 11 bots, 0 live background job(s). GPU: ...
-Restart Hermes Desktop to load the plugin.
+Hermes Desktop loads the plugin by itself within a few seconds. ...
 ```
 The bot count must match the user's bots. `0 bots` means the wrong folder was used: run the
 installer again with the right `-HermesHome`.
@@ -69,12 +70,13 @@ Check independently:
 must print `True`, and `Test-Path "<Hermes data folder>\desktop-plugins\crew-monitor\plugin.js"`
 must be `True`.
 
-## Step 4: tell the user to restart Hermes Desktop
-The panel appears only after Hermes Desktop restarts. **Do not restart or close Hermes yourself**:
-if you are running inside it, that ends your own session and any work in progress. Tell the user:
+## Step 4: tell the user
+Hermes Desktop watches its plugins folder and loads the panel within a few seconds; no restart is
+needed. **Do not restart or close Hermes yourself**: if you are running inside it, that ends your own
+session and any work in progress. Tell the user:
 
-> Crew Monitor is installed. Restart Hermes Desktop when convenient; a "Crew" panel will appear to
-> the right of the chat.
+> Crew Monitor is installed. A "Crew" panel should now be to the right of the chat. If it is not,
+> press Ctrl+K and run "Reload desktop plugins".
 
 ## If something fails
 | Message | What to do |

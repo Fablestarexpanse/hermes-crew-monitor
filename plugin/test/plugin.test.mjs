@@ -158,10 +158,10 @@ test('crewEvents: first payload is quiet, then finished and stalled are each sai
   assert.deepEqual(crewEvents({ finished: [fin] }, seen, true), [])
   assert.deepEqual(crewEvents({ finished: [fin] }, seen, false), [], 'already known from the first payload')
   const next = { ...fin, id: '7:1', ended_at: 200 }
-  assert.deepEqual(crewEvents({ finished: [next, dm, fin] }, seen, false), ['Reviewer finished desloppify review after 1h 02m'])
+  assert.deepEqual(crewEvents({ finished: [next, dm, fin] }, seen, false), [{ text: 'Reviewer finished desloppify review after 1h 02m', kind: 'success' }])
   assert.deepEqual(crewEvents({ finished: [next, dm, fin] }, seen, false), [])
   const stalled = { ts: 2000, bots: [{ title: 'Reviewer', jobs: [{ id: '8:1', label: 'desloppify review', progress: { stalled: true, changed_at: 1100 } }] }] }
-  assert.deepEqual(crewEvents(stalled, seen, false), ['Reviewer: desloppify review has made no progress for 15m 00s'])
+  assert.deepEqual(crewEvents(stalled, seen, false), [{ text: 'Reviewer: desloppify review has made no progress for 15m 00s', kind: 'warning' }])
   assert.deepEqual(crewEvents(stalled, seen, false), [])
   crewEvents({ ts: 2100, bots: [{ title: 'Reviewer', jobs: [{ id: '8:1', label: 'x', progress: { stalled: false } }] }] }, seen, false)
   assert.equal(crewEvents(stalled, seen, false).length, 1, 'stalling again after recovering is news')
@@ -194,4 +194,10 @@ test('instanceView: what is shown, and a button only for listed instances with c
   assert.equal(instanceView({ ...up, state: 'starting' }, 1000, true).action, 'stop')
   const found = { id: 'ollama', name: 'Ollama', state: 'running', port: 11434, listed: false, can_start: false, can_stop: false }
   assert.deepEqual([instanceView(found, 1000, true).meta, instanceView(found, 1000, true).action], ['port 11434 · detected', null])
+})
+
+test('a bot only the roster knows is titled by its display name', () => {
+  const rows = deriveRows({ crew, roster: [row('default', { display_name: 'Hermes' }), row('scout', { display_name: 'ignored: the service titled it' })], focusedProfile: null, busy: false, now: NOW })
+  assert.equal(rows.find(r => r.name === 'default').title, 'Hermes')
+  assert.equal(rows.find(r => r.name === 'scout').title, 'Scout')
 })

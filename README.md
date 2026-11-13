@@ -50,7 +50,7 @@ Tell your Hermes bot (or any AI agent that can run commands on your PC):
 > follow it to install Crew Monitor.
 
 [INSTALL.md](INSTALL.md) is written for an agent: it finds your Hermes folder, downloads this
-repository, runs the installer, checks the result, and then asks you to restart Hermes Desktop.
+repository, runs the installer and checks the result.
 
 ## Install yourself (Windows)
 You need Hermes Desktop and Windows 10 or 11. Python comes with Hermes; if yours has none, install
@@ -65,10 +65,12 @@ Python 3.9 or newer from python.org. Nothing else is downloaded or installed.
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
    ```
-3. Restart Hermes Desktop. The **Crew** panel appears to the right of the chat.
+3. The **Crew** panel appears to the right of the chat within a few seconds: Hermes Desktop loads
+   plugins as they land. If it does not, press Ctrl+K and run **Reload desktop plugins**, or restart
+   Hermes Desktop.
 
 The installer finds your Hermes data folder by itself (`HERMES_HOME` if you set it, otherwise
-`%USERPROFILE%\.hermes`). If it says it cannot find it, pass the folder that contains `profiles`:
+Hermes' default `%LOCALAPPDATA%\hermes`). If it says it cannot find it, pass the folder that contains `profiles`:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -HermesHome "D:\Hermes\data"
 ```
@@ -92,8 +94,8 @@ There is no installer yet and these are untested. By hand: copy `plugin/plugin.j
 ```bash
 python3 service/crew_status.py --log ~/.hermes/crew-monitor.log
 ```
-On these systems a reused process id cannot be told from the original job, so a finished job can
-occasionally linger in the list.
+On macOS a reused process id cannot be told from the original job, so a finished job can
+occasionally linger in the list (Linux and Windows check the process start time).
 
 ## What works out of the box
 - Every bot (Hermes profile) gets a row, named by its profile title. Thinking, idle, background jobs
@@ -141,7 +143,7 @@ marked `detected`. List your own in `crew-monitor.json`:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -EnableControl
 ```
-then restart Hermes Desktop. `-DisableControl` goes back to read-only. With control on:
+(the panel reloads by itself). `-DisableControl` goes back to read-only. With control on:
 - only instances you listed can be started or stopped, and only with the command you wrote; detected
   ones never get buttons;
 - **stop** asks "stop it?" first; it ends the program and everything it started, without saving;
@@ -150,8 +152,8 @@ then restart Hermes Desktop. `-DisableControl` goes back to read-only. With cont
 ## Troubleshooting
 - The panel is there but empty: the service is reading the wrong folder. Re-run the installer with
   `-HermesHome`; the log has a line saying so.
-- No panel after restarting: check that `<Hermes data>\desktop-plugins\crew-monitor\plugin.js` exists
-  and that desktop plugins are enabled in Hermes Desktop.
+- No panel: run **Reload desktop plugins** (Ctrl+K), then check that `<Hermes data>\desktop-plugins\crew-monitor\plugin.js` exists
+  and that Crew Monitor is switched on under Settings > Plugins in Hermes Desktop.
 - Log: `%LOCALAPPDATA%\HermesCrewMonitor\crew-monitor.log`.
 - `http://127.0.0.1:8094/health` shows the version, uptime and which page origins have connected.
 - "Status service is version ..." in the panel: plugin and service are from different installs;

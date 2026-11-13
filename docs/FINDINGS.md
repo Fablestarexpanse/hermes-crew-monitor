@@ -74,6 +74,36 @@ A live lock beats the ladder's own mode.
 - Verified: unit tests, a real start/stop of a throwaway server on Windows and Linux in CI, and the
   buttons in the demo page. Not verified: a real ComfyUI/Ollama, and the buttons inside Desktop.
 
+## Checked against the Hermes source (NousResearch/hermes-agent @ c9b20d7b, 2026-11-12)
+Read, not run. What the plugin relies on, and where it is defined:
+- Loader (`apps/desktop/src/contrib/runtime-loader.ts`): only `@hermes/plugin-sdk`, `react`,
+  `react/jsx-runtime` may be imported. Its import pattern, run over `plugin/plugin.js`, finds exactly
+  those three. Plugins hot-load when the file lands, so no restart is needed after install.
+- SDK exports used (`sdk/index.ts`, `sdk/areas.ts`): `Tip`, `atom`, `useValue`, `host`, `PALETTE_AREA`,
+  `STATUSBAR_AREAS`; `Tip` forwards `side`/`className` to the tooltip content.
+- Context (`contrib/plugin.ts`): `register`, `registerMany`, `onDispose`, `setInterval`,
+  `storage.get(key, fallback)` / `set`, and `os.notify` (native notification while the user is away,
+  now used next to the in-app toast). Toast kinds: `error | warning | info | success`.
+- `profiles.list` (`gateway/session_group_controls.py`): returns `{profiles: [...]}`; rows carry
+  `last_session`, `worker_session`, `canonical_session`, `ui_meta`, `display_name`, `is_default`;
+  `include_sessions` defaults to true, so `{}` is enough. No "waiting for the user" field exists on a
+  row: core's own needs-attention badge is client-side state (`$botAttention`) plugins cannot read.
+  So the amber **waiting for you** state cannot fire today; the code stays as a no-op guess.
+- Bots list row (`plugins/hermes-bots/bot-row.tsx`): still `data-roster-key` and a name
+  `span` with `truncate` and `font-medium`, which is what the row pulse and badge CSS target.
+  `ACTIVE_WINDOW_S = 90`, `WORKER_ACTIVE_WINDOW_S = 150` unchanged.
+- Hermes home (`hermes_constants.py`): `HERMES_HOME`, else `%LOCALAPPDATA%\hermes` on Windows and
+  `~/.hermes` elsewhere. The service and installer had assumed `~/.hermes` on Windows: fixed.
+- The default profile is the home folder itself (`processes.json` at the root): now read as bot
+  `default`. Named profiles are `profiles/<name>`.
+- `host_start_time` (`gateway/status.py`): `/proc/<pid>/stat` field 22 on Linux, psutil centiseconds
+  on Windows/macOS. The service now reads the same Linux value, so pid reuse is caught there too.
+- Kanban (`hermes_cli/kanban_db.py`): `tasks` has `assignee, status, completed_at, title,
+  created_at`; `blocked` is a real status.
+- Catalog lint (`hermes_cli/plugin_validate_desktop.py`): nothing the plugin does is refused, but
+  styling core rows through `[data-roster-key]` is the kind of app-markup reach catalog review warns
+  about, and the Pitfalls list says not to hardcode colours (the per-bot colours and amber do).
+
 ## Not done / limits
 - Plugin UI was exercised only through pure-logic tests with a stubbed SDK; real rendering needs
   Hermes Desktop restarted (see README).

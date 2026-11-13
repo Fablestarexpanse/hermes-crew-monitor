@@ -88,6 +88,11 @@ class StalePid(unittest.TestCase):
         self.assertTrue(cs.job_is_live(e, proc(birth=1000.2)))
         self.assertFalse(cs.job_is_live(e, proc(birth=5000.0)))
 
+    def test_linux_kernel_ticks_must_match_exactly(self):
+        e = {"pid": 7, "pid_scope": "host", "host_start_time": 123456, "started_at": 1000.0}
+        self.assertTrue(cs.job_is_live(e, lambda pid: cs.Proc(True, 1000.0, 123456)))
+        self.assertFalse(cs.job_is_live(e, lambda pid: cs.Proc(True, 1000.0, 123457)))  # recycled pid
+
     def test_non_host_scope_hidden(self):
         self.assertFalse(cs.job_is_live({**self.base, "pid_scope": "wsl"}, proc(birth=1793381473.72)))
 
@@ -135,6 +140,15 @@ class Snapshot(unittest.TestCase):
         self.assertEqual(j["cwd"], "F:/p")
         self.assertTrue(j["command"].startswith("run it x"))
         self.assertEqual(len(j["command"]), cs.COMMAND_MAX)
+
+    def test_default_profile_lives_in_the_home_folder_itself(self):
+        job = {"pid": 1, "pid_scope": "host", "command": "python research.py q", "started_at": NOW - 5}
+        home = self.make_home({"scout": []})
+        self.assertNotIn("default", [b["name"] for b in cs.list_bots(home)])  # unused: no empty row
+        (home / "processes.json").write_text(json.dumps([job]))
+        (home / "profile.yaml").write_text("display_name: 'Hermes'\n")
+        bots = {b["name"]: b for b in cs.snapshot(home, NOW, lambda pid: cs.Proc(True))["bots"]}
+        self.assertEqual((bots["default"]["title"], [j["label"] for j in bots["default"]["jobs"]]), ("Hermes", ["deep research"]))
 
     def test_job_in_another_profiles_file_goes_to_its_session_owner_once(self):
         review = {"pid": 5, "pid_scope": "host", "command": "python local_review.py x", "started_at": NOW - 60,
@@ -264,8 +278,14 @@ class GpuExtras(unittest.TestCase):
         self.assertEqual(cs.gpu_summary(None, None, nv, True)["label"], "Ladder unreachable")  # it used to answer
         self.assertEqual(cs.gpu_summary(None, {"app": "comfyui"}, nv, False)["state"], "held")
 
-    def test_default_home_is_hermes_own_default_not_one_machine(self):
-        self.assertIn(cs.DEFAULT_HOME, (Path.home() / ".hermes", Path(__import__("os").environ.get("HERMES_HOME") or "x")))
+    def test_default_home_matches_hermes_per_platform(self):
+        home = lambda: Path("/u/me")
+        self.assertEqual(cs.default_home({"HERMES_HOME": " /data/h "}, "win32", home), Path("/data/h"))
+        self.assertEqual(cs.default_home({"LOCALAPPDATA": "C:/Users/me/AppData/Local"}, "win32", home),
+                         Path("C:/Users/me/AppData/Local/hermes"))
+        self.assertEqual(cs.default_home({}, "win32", home), Path("/u/me/AppData/Local/hermes"))
+        self.assertEqual(cs.default_home({}, "linux", home), Path("/u/me/.hermes"))
+        self.assertEqual(cs.default_home({}, "darwin", home), Path("/u/me/.hermes"))
 
     def test_queue_is_every_gpu_job_but_the_lock_holder(self):
         def bots():

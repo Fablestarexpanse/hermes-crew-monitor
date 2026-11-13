@@ -33,8 +33,8 @@ function Find-HermesHome {
     $Candidates = @(
         $env:HERMES_HOME,
         [Environment]::GetEnvironmentVariable("HERMES_HOME", "User"),
+        (Join-Path $env:LOCALAPPDATA "hermes"),      # Hermes' default on Windows (hermes_constants.py)
         (Join-Path $env:USERPROFILE ".hermes"),
-        (Join-Path $env:LOCALAPPDATA "hermes"),
         (Join-Path $env:APPDATA "hermes")
     )
     foreach ($C in $Candidates) { if (& $Looks $C) { return $C } }
@@ -84,7 +84,7 @@ if ($Uninstall) {
         if (-not (Get-ChildItem -LiteralPath $InstallDir -Force)) { Remove-Item -LiteralPath $InstallDir -Force }
         else { Write-Host "Kept your settings: $Config" }
     }
-    Write-Host "Crew Monitor removed. Restart Hermes Desktop (or run 'Reload desktop plugins')."
+    Write-Host "Crew Monitor removed. The panel disappears by itself; if not, run 'Reload desktop plugins' (Ctrl+K) in Hermes."
     exit 0
 }
 
@@ -154,7 +154,8 @@ do {
         Write-Host ("Crew Monitor service {0} OK: {1} bots, {2} live background job(s). GPU: {3}" -f $H.version, $S.bots.Count, $Jobs, $S.gpu.label)
         Write-Host "Settings: $Config   Log: $Log"
         Write-Host ("Start/stop of listed local instances: {0}" -f $(if ($H.control) { "ON" } else { "off (read-only). Turn on with -EnableControl" }))
-        Write-Host "Restart Hermes Desktop to load the plugin."
+        Write-Host "Hermes Desktop loads the plugin by itself within a few seconds. If the Crew panel does not appear,"
+        Write-Host "press Ctrl+K in Hermes and run 'Reload desktop plugins', or restart Hermes Desktop."
         exit 0
     } catch { }
 } while ((Get-Date) -lt $Deadline)
