@@ -40,6 +40,13 @@ jobs:
           if (-not (Select-String -Path "$h\desktop-plugins\crew-monitor\plugin.js" -Pattern "const SERVICE_PORT = 8194" -Quiet)) { throw "port not set in installed plugin" }
           $crew = Invoke-RestMethod http://127.0.0.1:8194/crew
           if ($crew.bots[0].title -ne "Scout") { throw "service is not reading the test home" }
+          if ($crew.control) { throw "control must be off by default" }
+          # opt in: the panel copy and the service must end up with the same secret
+          powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -HermesHome $h -Port 8194 -EnableControl
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $token = (Get-Content "$env:LOCALAPPDATA\HermesCrewMonitor\control-token.txt" -Raw).Trim()
+          if (-not (Select-String -Path "$h\desktop-plugins\crew-monitor\plugin.js" -SimpleMatch "const CONTROL_TOKEN = '$token'" -Quiet)) { throw "token not set in installed plugin" }
+          if (-not (Invoke-RestMethod http://127.0.0.1:8194/health).control) { throw "control not on after -EnableControl" }
           powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall -HermesHome $h
           if (Test-Path "$h\desktop-plugins\crew-monitor") { throw "plugin not removed" }
           if (Get-ScheduledTask -TaskName HermesCrewMonitor -ErrorAction SilentlyContinue) { throw "task not removed" }

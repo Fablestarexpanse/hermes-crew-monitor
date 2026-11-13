@@ -45,7 +45,18 @@ class CrewHttp(unittest.TestCase):
             ("5", "scout", "todo", None, "send brief", 5)])
         con.commit()
         con.close()
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), cs.make_handler(home))
+        (home / "c.json").write_text(json.dumps({"instances": [{"name": "Demo", "port": 9, "start": "x"}]}))
+        self.calls = []
+
+        class Fake(cs.Instances):
+            def act(fake, iid, action):
+                self.calls.append((iid, action))
+                return 200, {"ok": True}
+        cfg = cs.ConfigFile(home / "c.json")
+        self.mon = cs.Monitor(home, config=cfg, token="s3cret-token-of-enough-length",
+                              instances=Fake(cfg, listeners=dict, processes=dict, vram=dict))
+        self.mon.instances.poll()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), cs.make_handler(self.mon))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -89,6 +100,39 @@ class CrewHttp(unittest.TestCase):
         self.assertTrue(line.startswith("data: "))
         self.assertEqual(json.loads(line[6:])["bots"][0]["name"], "reviewer")
         res.close()
+
+    def post(self, path, **headers):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.server.server_port}{path}", data=b"", headers=headers, method="POST")
+        try:
+            return urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_instances_are_listed_and_control_needs_the_token(self):
+        data = json.load(self.get("/crew"))
+        self.assertEqual((data["control"], [(i["id"], i["state"]) for i in data["instances"]]), (True, [("demo", "stopped")]))
+        self.assertEqual(self.post("/instances/demo/start"), 403)
+        self.assertEqual(self.post("/instances/demo/start", **{"X-Crew-Token": "wrong"}), 403)
+        self.assertEqual(self.post("/instances/demo/start", Origin="https://evil.example", **{"X-Crew-Token": self.mon.token}), 403)
+        self.assertEqual(self.post("/instances/demo/restart", **{"X-Crew-Token": self.mon.token}), 404)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.post("/instances/demo/start", Origin="app://hermes", **{"X-Crew-Token": self.mon.token}), 200)
+        self.assertEqual(self.calls, [("demo", "start")])
+
+    def test_control_is_off_without_a_token(self):
+        self.mon.token = ""
+        self.assertEqual(self.post("/instances/demo/stop", **{"X-Crew-Token": ""}), 403)
+        self.assertFalse(json.load(self.get("/crew"))["control"])
+        self.assertEqual(self.calls, [])
+
+    def test_preflight_allows_the_token_header_for_app_origins_only(self):
+        url = f"http://127.0.0.1:{self.server.server_port}/instances/demo/stop"
+        res = urllib.request.urlopen(urllib.request.Request(url, method="OPTIONS", headers={"Origin": "app://hermes"}), timeout=5)
+        self.assertEqual((res.status, res.headers["Access-Control-Allow-Origin"]), (204, "app://hermes"))
+        self.assertIn("X-Crew-Token", res.headers["Access-Control-Allow-Headers"])
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(urllib.request.Request(url, method="OPTIONS", headers={"Origin": "https://evil.example"}), timeout=5)
+        self.assertEqual(cm.exception.code, 403)
 
     def test_unknown_path_404(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:

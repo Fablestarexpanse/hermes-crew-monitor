@@ -47,7 +47,9 @@ body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--b
 import { createElement as h } from 'react'
 import { createRoot } from 'react-dom/client'
 import { host } from '@hermes/plugin-sdk'
-import plugin from '../../plugin/plugin.js'
+// Like install.ps1 -EnableControl: the page loads a copy of the plugin with a control token written in.
+const source = (await (await fetch('../../plugin/plugin.js')).text()).replace("const CONTROL_TOKEN = ''", "const CONTROL_TOKEN = 'demo'")
+const { default: plugin } = await import(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })))
 
 const q = new URLSearchParams(location.search)
 document.documentElement.dataset.theme = q.get('theme') === 'dark' ? 'dark' : 'light'
@@ -73,7 +75,12 @@ const jobs = {
   'asset-bot': [{ label: 'GPU job (comfyui)', started_at: now - 245, pid: 9920, cwd: 'F:\\Hermes\\tools', command: 'python gpu_job.py --app comfyui -- render.json' }],
 }
 const crew = {
-  api: 2, version: '0.2.0', ts: now,
+  api: 3, version: '0.3.0', ts: now, control: true,
+  instances: [
+    { id: 'comfyui', name: 'ComfyUI', state: 'running', pid: 9920, port: 8188, started_at: now - 7500, vram_mib: 14950, listed: true, can_start: true, can_stop: true },
+    { id: 'ladder', name: 'Fit Ladder', state: 'stopped', pid: null, port: 8093, started_at: null, vram_mib: null, listed: true, can_start: true, can_stop: true },
+    { id: 'ollama', name: 'Ollama', state: 'running', pid: 3344, port: 11434, started_at: now - 90000, vram_mib: null, listed: false, can_start: false, can_stop: false },
+  ],
   gpu: { state: 'held', label: 'held by gpu_job comfyui', vram_used_mib: 21300, vram_total_mib: 24564, util_pct: 97, temp_c: 71, queue: [{ bot: 'trailer-bot', title: 'Trailer Bot', label: 'GPU job (blender)' }] },
   finished: [
     { id: 'f1', bot: 'senior-dev', title: 'Senior Dev', kind: 'other', label: 'build player', started_at: now - 1100, ended_at: now - 240, duration_s: 860 },

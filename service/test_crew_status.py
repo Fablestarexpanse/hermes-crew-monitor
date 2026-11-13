@@ -373,5 +373,108 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual((t["blocked"], [i["title"] for i in t["items"]]), (1, ["b", "a"]))
 
 
+class InstancesTest(unittest.TestCase):
+    CFG = {"instances": [
+        {"name": "ComfyUI", "port": 8188, "start": "run.bat", "cwd": "F:/ComfyUI"},
+        {"name": "Ollama", "id": "ollama", "process": "ollama.exe"},
+        {"name": "no way to tell if it is up"}, {"name": "ComfyUI", "port": 1}, {"name": "x", "id": "../evil", "port": 2},
+        {"name": "bad port", "port": "8188"}, "nonsense"]}
+
+    def manager(self, listeners=None, procs=None, cfg=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        f = Path(tmp.name) / "crew-monitor.json"
+        f.write_text(json.dumps(cfg or self.CFG))
+        self.listeners, self.procs = listeners or {}, procs or {}
+        return cs.Instances(cs.ConfigFile(f), Path(tmp.name) / "logs", probe=lambda pid: cs.Proc(True, 1000.0),
+                            listeners=lambda: dict(self.listeners), processes=lambda: dict(self.procs),
+                            vram=lambda: {4321: 6144}, clock=lambda: NOW)
+
+    def test_config_keeps_only_well_formed_instances(self):
+        inst = cs.parse_config(self.CFG).instances
+        self.assertEqual([(i.id, i.port, i.process, i.start) for i in inst],
+                         [("comfyui", 8188, None, "run.bat"), ("ollama", None, "ollama.exe", None)])
+        self.assertEqual(cs.parse_config({"instances": "x"}).instances, ())
+
+    def test_status_by_port_and_by_process_name(self):
+        m = self.manager({8188: 4321}, {"ollama.exe": [77]})
+        by = {i["id"]: i for i in m.poll()}
+        self.assertEqual((by["comfyui"]["state"], by["comfyui"]["pid"], by["comfyui"]["vram_mib"], by["comfyui"]["started_at"]),
+                         ("running", 4321, 6144, 1000))
+        self.assertEqual((by["comfyui"]["can_start"], by["comfyui"]["can_stop"]), (True, True))
+        self.assertEqual((by["ollama"]["state"], by["ollama"]["can_start"], by["ollama"]["vram_mib"]), ("running", False, None))
+        self.listeners, self.procs = {}, {}
+        self.assertEqual([i["state"] for i in m.poll()], ["stopped", "stopped"])
+
+    def test_well_known_servers_show_only_when_up_and_are_never_controllable(self):
+        m = self.manager({11434: 9, 1234: 10}, cfg={"instances": []})
+        got = m.poll()
+        self.assertEqual([(i["name"], i["listed"], i["can_start"], i["can_stop"]) for i in got],
+                         [("Ollama", False, False, False), ("LM Studio", False, False, False)])
+        self.assertEqual(m.act("ollama", "stop")[0], 404)  # found, but not listed: hands off
+
+    def test_act_refuses_what_makes_no_sense(self):
+        m = self.manager({8188: 4321}, {})
+        self.assertEqual(m.act("nope", "start")[0], 404)
+        self.assertEqual(m.act("comfyui", "start")[0], 409)  # already running
+        self.assertEqual(m.act("ollama", "stop")[0], 409)  # not running
+        self.assertEqual(m.act("ollama", "start")[0], 400)  # no start command
+
+    def test_kill_tree_never_touches_system_pids_or_itself(self):
+        import os
+        calls = []
+        for pid in (0, 4, -1, None, os.getpid()):
+            self.assertFalse(cs.kill_tree(pid, run=lambda *a, **k: calls.append(a)))
+        self.assertEqual(calls, [])
+
+    def test_netstat_and_tasklist_output_is_parsed(self):
+        import os
+        class R:
+            stdout = ""
+        if os.name == "nt":
+            R.stdout = ("  Proto  Local Address  Foreign Address  State  PID\n"
+                        "  TCP    127.0.0.1:8188    0.0.0.0:0    LISTENING    4321\n"
+                        "  TCP    [::]:11434    [::]:0    ABHÖREN    77\n"
+                        "  TCP    127.0.0.1:50000    127.0.0.1:8188    ESTABLISHED    5\n")
+            self.assertEqual(cs.read_listeners(lambda *a, **k: R), {8188: 4321, 11434: 77})
+            R.stdout = '"ollama.exe","77","Console","1","50,000 K"\n"Ollama.exe","78","Console","1","1 K"\n'
+            self.assertEqual(cs.read_processes(lambda *a, **k: R), {"ollama.exe": [77, 78]})
+        else:
+            R.stdout = 'LISTEN 0 5 127.0.0.1:8188 0.0.0.0:* users:(("python",pid=4321,fd=3))\nLISTEN 0 5 [::]:11434 [::]:*\n'
+            self.assertEqual(cs.read_listeners(lambda *a, **k: R), {8188: 4321, 11434: None})
+            R.stdout = "   77 ollama\n   78 ollama\n"
+            self.assertEqual(cs.read_processes(lambda *a, **k: R), {"ollama": [77, 78]})
+        R.stdout = "4321, 6144\n99, [N/A]\n"
+        self.assertEqual(cs.read_vram_by_pid(lambda *a, **k: R), {4321: 6144})
+
+    def test_really_starts_and_stops_a_listed_server(self):
+        import socket, sys, time
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        f = Path(tmp.name) / "c.json"
+        f.write_text(json.dumps({"instances": [{"name": "Demo", "port": port,
+                                                "start": f'"{sys.executable}" -m http.server {port} --bind 127.0.0.1'}]}))
+        m = cs.Instances(cs.ConfigFile(f), Path(tmp.name) / "logs")
+        self.addCleanup(lambda: m.act("demo", "stop"))
+
+        def wait_for(state):
+            end = time.time() + 20
+            while time.time() < end:
+                if m.poll()[0]["state"] == state:
+                    return True
+                time.sleep(0.2)
+            return False
+        self.assertEqual(m.poll()[0]["state"], "stopped")
+        self.assertEqual(m.act("demo", "start"), (200, {"ok": True, "state": "starting"}))
+        self.assertTrue(wait_for("running"), m.poll())
+        self.assertEqual(m.act("demo", "start")[0], 409)
+        self.assertEqual(m.act("demo", "stop")[0], 200)
+        self.assertTrue(wait_for("stopped"), m.poll())
+        self.assertTrue((Path(tmp.name) / "logs" / "demo.log").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

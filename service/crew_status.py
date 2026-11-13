@@ -2,8 +2,12 @@
 
 Read-only, stdlib-only, bound to 127.0.0.1. GET /crew returns, per Hermes profile (bot), the
 background jobs that are really still running, recently finished jobs, kanban progress and a GPU
-summary. GET /events pushes the same payload as server-sent events whenever it changes; GET /health
+summary, and which local AI servers (ComfyUI, Ollama, ...) are up. GET /events pushes the same payload as server-sent events whenever it changes; GET /health
 reports version and uptime.
+
+Starting and stopping the local servers named in the settings file is the one thing that is not
+read-only. It is off unless the service is started with --control and a token file, and every such
+request must carry that token (see "local instances" below).
 
 It only exists because a Hermes Desktop plugin cannot read the filesystem or probe pids.
 "Thinking" state is NOT computed here: the plugin reads it from the same profiles.list roster
@@ -15,12 +19,17 @@ data Desktop's own "Active now" uses (see docs/FINDINGS.md).
 from __future__ import annotations
 
 import argparse
+import csv
+import hmac
+import io
 import json
 import logging
 import logging.handlers
 import os
 import re
 import shlex
+import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -38,8 +47,8 @@ from typing import Callable, Optional
 DEFAULT_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 DEFAULT_PORT = 8094
 LADDER_URL = "http://127.0.0.1:8093/"
-VERSION = "0.2.0"
-API = 2  # bumped when the /crew payload changes shape; the plugin warns on a mismatch
+VERSION = "0.3.0"
+API = 3  # bumped when the /crew payload changes shape; the plugin warns on a mismatch
 
 log = logging.getLogger("crew-monitor")
 log.addHandler(logging.NullHandler())
@@ -458,6 +467,277 @@ def gpu_queue(bots: list, gpu: dict) -> list:
     return out
 
 
+# --- local instances --------------------------------------------------------------------------
+# Local AI servers and apps: is each one up, and (only for the ones the user listed, and only with
+# --control) start it or stop it.
+
+_NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
+_SLUG = re.compile(r"^[A-Za-z0-9][\w.-]{0,39}$")
+# Shown when found listening even if not listed. Never startable or stoppable: not listed.
+KNOWN_INSTANCES = (("ollama", "Ollama", 11434), ("comfyui", "ComfyUI", 8188), ("lm-studio", "LM Studio", 1234),
+                   ("sd-webui", "Stable Diffusion WebUI", 7860))
+
+
+@dataclass(frozen=True)
+class Instance:
+    id: str
+    name: str
+    port: Optional[int] = None  # up = something listens on 127.0.0.1:port
+    process: Optional[str] = None  # ...or, with no port, a process with this image name exists
+    start: Optional[str] = None  # command line; without one it can be stopped but not started
+    stop: Optional[str] = None  # optional command to run before the processes are ended
+    cwd: Optional[str] = None
+    window: bool = False  # show the program's console window instead of logging its output
+    listed: bool = True
+
+
+def parse_instances(data) -> tuple:
+    out, ids = [], set()
+    for d in data if isinstance(data, list) else []:
+        try:
+            name = str(d["name"]).strip()[:60]
+            iid = str(d.get("id") or re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower())
+            port = d.get("port")
+            port = port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+            process = str(d["process"]).strip() if d.get("process") else None
+            if not name or not _SLUG.match(iid) or iid in ids or (port is None and not process):
+                raise ValueError("needs a name, a unique id, and a port or a process")
+            text = lambda k: str(d[k]) if isinstance(d.get(k), str) and d[k].strip() else None
+            out.append(Instance(iid, name, port, process, text("start"), text("stop"), text("cwd"), d.get("window") is True))
+            ids.add(iid)
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("config: skipped instance %r: %s", d, exc)
+    return tuple(out)
+
+
+def read_listeners(run=subprocess.run) -> dict:
+    """{tcp port: pid} of everything listening on this machine (pid None when the OS will not say)."""
+    out = {}
+    try:
+        if os.name == "nt":
+            text = run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=8, creationflags=_NO_WINDOW).stdout
+            for line in text.splitlines():
+                f = line.split()
+                # a listening row has no remote end; the state word itself is translated on non-English Windows
+                if len(f) >= 5 and f[0] == "TCP" and f[2] in ("0.0.0.0:0", "[::]:0", "*:*"):
+                    out.setdefault(int(f[1].rsplit(":", 1)[1]), int(f[-1]))
+        else:
+            text = run(["ss", "-ltnpH"], capture_output=True, text=True, timeout=8).stdout
+            for line in text.splitlines():
+                f = line.split()
+                m = re.search(r"pid=(\d+)", line)
+                if len(f) >= 4:
+                    out.setdefault(int(f[3].rsplit(":", 1)[1]), int(m.group(1)) if m else None)
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass
+    return out
+
+
+def port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def read_processes(run=subprocess.run) -> dict:
+    """{image name, lower case: [pid, ...]}."""
+    out: dict = {}
+    try:
+        if os.name == "nt":
+            text = run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW).stdout
+            rows = ((r[0], r[1]) for r in csv.reader(io.StringIO(text)) if len(r) >= 2)
+        else:
+            text = run(["ps", "-eo", "pid=,comm="], capture_output=True, text=True, timeout=10).stdout
+            rows = ((f[1], f[0]) for f in (line.split(None, 1) for line in text.splitlines()) if len(f) == 2)
+        for name, pid in rows:
+            out.setdefault(name.strip().lower(), []).append(int(pid))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return out
+
+
+def read_vram_by_pid(run=subprocess.run) -> dict:
+    """{pid: MiB} from nvidia-smi. Often empty on Windows, where the driver does not report it."""
+    try:
+        text = run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                   capture_output=True, text=True, timeout=4, creationflags=_NO_WINDOW if os.name == "nt" else 0).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out = {}
+    for line in text.splitlines():
+        try:
+            pid, used = (x.strip() for x in line.split(","))
+            out[int(pid)] = int(float(used))
+        except ValueError:
+            continue
+    return out
+
+
+def instance_status(inst: Instance, listeners: dict, procs: dict, launched_alive: bool = False) -> dict:
+    """{state, pids} where state is running | starting | stopped."""
+    if inst.port is not None:
+        up = inst.port in listeners
+        pids = [listeners[inst.port]] if up and listeners[inst.port] else []
+    else:
+        pids = list(procs.get(inst.process.lower(), []))
+        up = bool(pids)
+    return {"state": "running" if up else "starting" if launched_alive else "stopped", "pids": pids}
+
+
+def kill_tree(pid: int, run=subprocess.run) -> bool:
+    """End a process and everything it started. Never a system pid or this service."""
+    if not isinstance(pid, int) or pid <= 4 or pid == os.getpid():
+        return False
+    try:
+        if os.name == "nt":
+            return run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15, creationflags=_NO_WINDOW).returncode == 0
+        try:
+            # a process we launched leads its own group: take the whole group
+            os.killpg(pid, signal.SIGTERM) if os.getpgid(pid) == pid else os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def launch(inst: Instance, log_dir: Optional[Path]) -> subprocess.Popen:
+    """Start an instance detached from this service; its output goes to <log_dir>/<id>.log."""
+    out = subprocess.DEVNULL
+    if log_dir is not None and not inst.window:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        out = open(log_dir / f"{inst.id}.log", "ab")
+    kw: dict = {"shell": True, "cwd": inst.cwd, "stdin": subprocess.DEVNULL, "stdout": out, "stderr": subprocess.STDOUT}
+    try:
+        if os.name != "nt":
+            return subprocess.Popen(inst.start, start_new_session=True, **kw)
+        flags = 0x00000200 | (0x00000010 if inst.window else _NO_WINDOW)  # NEW_PROCESS_GROUP | NEW_CONSOLE
+        if inst.window:
+            kw.update(stdout=None, stderr=None)
+        try:
+            # outside the scheduled task's job, so re-installing the monitor does not take it down
+            return subprocess.Popen(inst.start, creationflags=flags | 0x01000000, **kw)  # BREAKAWAY_FROM_JOB
+        except OSError:
+            return subprocess.Popen(inst.start, creationflags=flags, **kw)
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()  # the child has its own handle
+
+
+class Instances:
+    """Polls the listed (and well-known) local servers; starts and stops the listed ones on request."""
+
+    def __init__(self, config: "ConfigFile", log_dir: Optional[Path] = None, probe: Probe = probe_pid,
+                 listeners: Callable[[], dict] = read_listeners, processes: Callable[[], dict] = read_processes,
+                 vram: Callable[[], dict] = read_vram_by_pid, clock: Callable[[], float] = time.time):
+        self._config, self.log_dir, self.probe, self.clock = config, log_dir, probe, clock
+        self._listeners, self._processes, self._vram = listeners, processes, vram
+        self._lock = threading.RLock()
+        self._launched: dict = {}  # id -> (Popen, started epoch)
+        self._value: list = []
+        self._vram_at, self._vram_map = 0.0, {}
+
+    def get(self) -> list:
+        return self._value
+
+    def _defs(self) -> list:
+        listed = list(self._config.get().instances)
+        taken = {i.port for i in listed if i.port} | {None}
+        ids = {i.id for i in listed}
+        return listed + [Instance(i, n, p, listed=False) for i, n, p in KNOWN_INSTANCES if p not in taken and i not in ids]
+
+    def _alive(self, iid: str) -> bool:
+        hit = self._launched.get(iid)
+        if hit and hit[0].poll() is None:
+            return True
+        self._launched.pop(iid, None)
+        return False
+
+    def poll(self) -> list:
+        with self._lock:
+            defs = self._defs()
+            listeners = self._listeners()
+            if os.name != "nt":  # ss can be missing or hide other users' sockets: fall back to knocking
+                for d in defs:
+                    if d.port and d.port not in listeners and port_open(d.port):
+                        listeners[d.port] = None
+            procs = self._processes() if any(d.process and d.port is None for d in defs) else {}
+            out, now = [], self.clock()
+            for d in defs:
+                st = instance_status(d, listeners, procs, self._alive(d.id))
+                if not d.listed and st["state"] != "running":
+                    continue  # a well-known server that is not here is not worth a line
+                pid = st["pids"][0] if st["pids"] else None
+                birth = self.probe(pid).birth if pid else None
+                if birth is None and d.id in self._launched and st["state"] != "stopped":
+                    birth = self._launched[d.id][1]
+                out.append({"id": d.id, "name": d.name, "state": st["state"], "pid": pid, "port": d.port,
+                            "started_at": round(birth) if birth else None, "pids": st["pids"], "listed": d.listed,
+                            "can_start": d.listed and bool(d.start), "can_stop": d.listed})
+            if any(i["pids"] for i in out) and time.monotonic() - self._vram_at > 10:
+                self._vram_map, self._vram_at = self._vram(), time.monotonic()
+            for i in out:
+                used = [self._vram_map[p] for p in i.pop("pids") if p in self._vram_map]
+                i["vram_mib"] = sum(used) if used else None
+            self._value = out
+            return out
+
+    def run(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                self.poll()
+            except Exception:
+                log.exception("instance poll failed")
+            stop.wait(3.0)
+
+    def act(self, iid: str, action: str):
+        """(http status, body). Only listed instances; start only with a start command."""
+        with self._lock:
+            inst = next((i for i in self._config.get().instances if i.id == iid), None)
+            if inst is None:
+                return 404, {"error": f"no listed instance '{iid}'"}
+            listeners = self._listeners()
+            if os.name != "nt" and inst.port and inst.port not in listeners and port_open(inst.port):
+                listeners[inst.port] = None
+            st = instance_status(inst, listeners, self._processes() if inst.port is None else {}, self._alive(iid))
+            if action == "start":
+                if not inst.start:
+                    return 400, {"error": f"{inst.name} has no start command in the settings file"}
+                if st["state"] != "stopped":
+                    return 409, {"error": f"{inst.name} is already {st['state']}"}
+                try:
+                    self._launched[iid] = (launch(inst, self.log_dir), self.clock())
+                except OSError as exc:
+                    log.error("start %s failed: %s", iid, exc)
+                    return 500, {"error": f"could not start {inst.name}: {exc}"}
+                log.info("started %s: %s", iid, inst.start)
+                return 200, {"ok": True, "state": "starting"}
+            if st["state"] == "stopped":
+                return 409, {"error": f"{inst.name} is not running"}
+            if inst.stop:
+                try:
+                    subprocess.run(inst.stop, shell=True, cwd=inst.cwd, timeout=20, capture_output=True,
+                                   creationflags=_NO_WINDOW if os.name == "nt" else 0)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    log.warning("stop command for %s failed: %s", iid, exc)
+            pids = list(st["pids"])
+            child = self._launched.pop(iid, (None,))[0]
+            if child is not None:
+                pids.insert(0, child.pid)
+            killed = [p for p in dict.fromkeys(pids) if kill_tree(p)]
+            if child is not None:
+                try:
+                    child.wait(timeout=5)  # reap it
+                except subprocess.TimeoutExpired:
+                    pass
+            log.info("stopped %s: pids %s", iid, killed)
+            if not killed and not inst.stop:
+                return 500, {"error": f"could not stop {inst.name}: its process could not be ended"}
+            return 200, {"ok": True, "state": "stopping"}
+
+
 # --- config -----------------------------------------------------------------------------------
 
 _COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
@@ -468,6 +748,7 @@ class Config:
     rules: tuple = ()  # (compiled pattern, kind, label), tried before the built-in classifier
     colors: dict = field(default_factory=dict)  # bot name -> "#rrggbb"
     stall_s: int = DEFAULT_STALL_S
+    instances: tuple = ()  # Instance, the local servers the user listed
 
 
 def parse_config(data) -> Config:
@@ -483,7 +764,7 @@ def parse_config(data) -> Config:
     colors = {str(k): v for k, v in (data.get("colors") or {}).items() if isinstance(v, str) and _COLOR.match(v)}
     stall = data.get("stall_minutes")
     stall_s = int(stall * 60) if isinstance(stall, (int, float)) and stall > 0 else DEFAULT_STALL_S
-    return Config(tuple(rules), colors, stall_s)
+    return Config(tuple(rules), colors, stall_s, parse_instances(data.get("instances")))
 
 
 class ConfigFile:
@@ -491,10 +772,15 @@ class ConfigFile:
 
     def __init__(self, path: Optional[Path]):
         self.path, self._mtime, self._cfg = path, None, Config()
+        self._lock = threading.Lock()
 
     def get(self) -> Config:
         if self.path is None:
             return self._cfg
+        with self._lock:
+            return self._load()
+
+    def _load(self) -> Config:
         try:
             mtime = self.path.stat().st_mtime
         except OSError:
@@ -525,7 +811,8 @@ def snapshot(home: Path = DEFAULT_HOME, now: Optional[float] = None, probe: Prob
             for b in bots]
     gpu = dict(gpu) if gpu else gpu_summary(None, None)
     gpu["queue"] = gpu_queue(bots, gpu)
-    return {"api": API, "version": VERSION, "ts": now, "gpu": gpu, "bots": bots, "finished": []}
+    return {"api": API, "version": VERSION, "ts": now, "gpu": gpu, "bots": bots, "finished": [],
+            "instances": [], "control": False}
 
 
 class Monitor:
@@ -535,8 +822,11 @@ class Monitor:
     """
 
     def __init__(self, home: Path, probe: Probe = probe_pid, gpu: Optional[Callable[[], dict]] = None,
-                 config: Optional[ConfigFile] = None, clock: Callable[[], float] = time.time):
+                 config: Optional[ConfigFile] = None, clock: Callable[[], float] = time.time,
+                 instances: Optional[Instances] = None, token: str = ""):
         self.home, self.probe, self.clock = home, probe, clock
+        self.instances = instances
+        self.token = token  # non-empty = start/stop requests are accepted when they carry it
         self._gpu = gpu or (lambda: None)
         self._config = config or ConfigFile(None)
         self._refresh_lock = threading.Lock()
@@ -558,6 +848,9 @@ class Monitor:
             snap = snapshot(self.home, now, self.probe, self._gpu(), cfg)
             self._observe(snap, now, cfg)
             snap["finished"] = list(self.finished)
+            if self.instances is not None:
+                snap["instances"] = self.instances.get()
+                snap["control"] = bool(self.token)
             sig = _signature(snap)
             with self._cond:
                 self._snap = snap
@@ -731,6 +1024,48 @@ def make_handler(source, allow_origins: frozenset = frozenset()):
             finally:
                 mon.clients -= 1
 
+        def _reply(self, status: int, body: dict) -> None:
+            data = json.dumps(body).encode("utf-8")
+            self._head(status, "application/json", len(data))
+            self.wfile.write(data)
+
+        def do_OPTIONS(self):  # noqa: N802  (preflight for the token header)
+            if not self._gate():
+                return
+            self.send_response(204)
+            origin = self.headers.get("Origin")
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST")
+            self.send_header("Access-Control-Allow-Headers", "X-Crew-Token, Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):  # noqa: N802
+            m = re.fullmatch(r"/instances/([\w.-]+)/(start|stop)", self.path.split("?")[0])
+            if not m:
+                self.send_error(404)
+            elif not self._gate():
+                pass
+            elif not mon.token or mon.instances is None:
+                self._reply(403, {"error": "control is off: re-run install.ps1 -EnableControl"})
+            elif not hmac.compare_digest(self.headers.get("X-Crew-Token", "").encode(), mon.token.encode()):
+                log.warning("refused %s: bad or missing token", self.path)
+                self._reply(403, {"error": "bad token: re-run install.ps1 so the panel and the service match"})
+            else:
+                try:
+                    status, body = mon.instances.act(m.group(1), m.group(2))
+                    if status == 200:
+                        time.sleep(0.4)  # let the port open or close, then show it at once
+                        mon.instances.poll()
+                        mon.refresh()
+                except Exception as exc:
+                    log.exception("request failed: %s", self.path)
+                    status, body = 500, {"error": str(exc)}
+                self._reply(status, body)
+
         def do_GET(self):  # noqa: N802
             path = self.path.split("?")[0]
             if path not in ("/crew", "/events", "/health"):
@@ -745,7 +1080,7 @@ def make_handler(source, allow_origins: frozenset = frozenset()):
                 self._json(lambda: {
                     "ok": True, "api": API, "version": VERSION, "home": str(mon.home),
                     "uptime_s": round(mon.clock() - mon.started), "clients": mon.clients,
-                    "origins_seen": sorted(origins_seen),
+                    "origins_seen": sorted(origins_seen), "control": bool(mon.token and mon.instances),
                 })
 
         def log_message(self, *_):
@@ -771,6 +1106,9 @@ def main(argv=None) -> int:
     ap.add_argument("--ladder-url", default=LADDER_URL, help='Fit Ladder status URL; "" to never ask')
     ap.add_argument("--allow-origin", action="append", default=[],
                     help="exact Origin allowed to read the service; repeatable. Default: any non-web origin")
+    ap.add_argument("--control", action="store_true",
+                    help="allow starting/stopping the instances listed in the config (needs --token-file)")
+    ap.add_argument("--token-file", type=Path, help="file holding the secret the panel sends with start/stop")
     a = ap.parse_args(argv)
     if a.log:
         h = logging.handlers.RotatingFileHandler(a.log, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
@@ -781,16 +1119,27 @@ def main(argv=None) -> int:
         log.warning("no profiles folder in %s: is --home the Hermes data folder?", a.home)
     try:
         poller = GpuPoller(a.gpu_lock or default_gpu_lock(a.home), a.ladder_url)
-        mon = Monitor(a.home, gpu=poller.get, config=ConfigFile(a.config))
+        token = ""
+        if a.control:
+            try:
+                token = a.token_file.read_text(encoding="utf-8").strip() if a.token_file else ""
+            except OSError as exc:
+                log.error("control stays off: cannot read token file: %s", exc)
+            if len(token) < 24:
+                log.error("control stays off: --control needs a --token-file with a long random secret")
+                token = ""
+        config = ConfigFile(a.config)
+        instances = Instances(config, a.log.parent / "instances" if a.log else None)
+        mon = Monitor(a.home, gpu=poller.get, config=config, instances=instances, token=token)
         server = Server(("127.0.0.1", a.port), make_handler(mon, frozenset(a.allow_origin)))
     except OSError as exc:  # port taken: say so instead of dying silently
         log.error("cannot start on 127.0.0.1:%s: %s", a.port, exc)
         print(f"cannot start on 127.0.0.1:{a.port}: {exc}", file=sys.stderr)
         return 1
     stop = threading.Event()
-    for target in (poller.run, mon.run):
+    for target in (poller.run, instances.run, mon.run):
         threading.Thread(target=target, args=(stop,), daemon=True).start()
-    log.info("crew monitor %s serving %s on 127.0.0.1:%s", VERSION, a.home, a.port)
+    log.info("crew monitor %s serving %s on 127.0.0.1:%s (control %s)", VERSION, a.home, a.port, "on" if token else "off")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

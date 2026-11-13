@@ -59,6 +59,21 @@ A live lock beats the ladder's own mode.
 - The plugin keeps the last payload until 3 reads in a row fail, so one slow read no longer blanks it.
 - Windows: `allow_reuse_address` is off, otherwise a second service binds the same port silently.
 
+## Local instances and control (v0.3)
+- "Up" is decided by a listening TCP port (`netstat -ano`, which also gives the pid) or, without a
+  port, by image name (`tasklist`). Listening rows are recognised by their empty remote end, because
+  the state word is translated on non-English Windows.
+- Start/stop breaks the read-only rule, so it is opt-in (`--control` + a token file) and limited to
+  instances in the settings file. The origin gate alone is not enough for a request that changes
+  something: a sandboxed iframe sends `Origin: null`, which the gate lets through. Hence the secret
+  in an `X-Crew-Token` header, which also forces a CORS preflight.
+- Started programs are asked to break away from the scheduled task's job object so re-installing the
+  monitor does not end them; if Windows refuses, they start inside it and do end with the service.
+- Stop is `taskkill /T /F` on the port owner and on the process this service launched: no graceful
+  shutdown. A `stop` command in the settings runs first for programs that have one.
+- Verified: unit tests, a real start/stop of a throwaway server on Windows and Linux in CI, and the
+  buttons in the demo page. Not verified: a real ComfyUI/Ollama, and the buttons inside Desktop.
+
 ## Not done / limits
 - Plugin UI was exercised only through pure-logic tests with a stubbed SDK; real rendering needs
   Hermes Desktop restarted (see README).

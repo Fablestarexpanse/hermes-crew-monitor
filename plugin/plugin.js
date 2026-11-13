@@ -8,11 +8,13 @@
 //    events); polled from /crew when that is unavailable.
 import { PALETTE_AREA, STATUSBAR_AREAS, Tip, atom, host, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
+import { useState } from 'react'
 
 const ID = 'crew-monitor'
 const SERVICE_PORT = 8094 // install.ps1 -Port rewrites this line in the installed copy
 const BASE = `http://127.0.0.1:${SERVICE_PORT}`
-const API = 2 // crew_status.py API: the /crew payload shape this file expects
+const CONTROL_TOKEN = '' // install.ps1 -EnableControl writes the start/stop secret here (installed copy only)
+const API = 3 // crew_status.py API: the /crew payload shape this file expects
 const STYLE_ID = 'crew-monitor-style'
 const ACTIVE_WINDOW_S = 90 // row-helpers.ts ACTIVE_WINDOW_S
 const WORKER_WINDOW_S = 150 // row-helpers.ts WORKER_ACTIVE_WINDOW_S
@@ -214,6 +216,25 @@ export function gpuView(gpu) {
   ].filter(Boolean)
   const queue = (gpu.queue || []).map(q => q.title)
   return { frac: has ? Math.min(1, Math.max(0, used / total)) : null, meta: meta.join(' · '), queue: queue.length ? `waiting for GPU: ${queue.join(', ')}` : '' }
+}
+
+/**
+ * One "local instance" (ComfyUI, Ollama, ...) for the panel. `action` is the button to offer, if any:
+ * only for instances the user listed, and only when the service has control switched on and this
+ * copy of the plugin holds the token.
+ */
+export function instanceView(inst, nowS, canControl) {
+  const meta = [
+    inst.port ? `port ${inst.port}` : null,
+    inst.vram_mib != null ? `${gb(inst.vram_mib)} GB` : null,
+    inst.state === 'running' && inst.started_at ? `up ${fmtElapsed(nowS - inst.started_at)}` : null,
+    inst.state === 'starting' ? 'starting' : inst.state === 'stopped' ? 'stopped' : null,
+    inst.listed ? null : 'detected',
+  ].filter(Boolean)
+  let action = null
+  if (canControl && inst.state === 'stopped' && inst.can_start) action = 'start'
+  else if (canControl && inst.state !== 'stopped' && inst.can_stop) action = 'stop'
+  return { id: inst.id, name: inst.name, state: inst.state, meta: meta.join(' · '), action }
 }
 
 /** Tooltip for the status-bar chip: one line per busy bot. */
@@ -508,6 +529,59 @@ function GpuRow({ gpu }) {
   })
 }
 
+async function instanceAction(inst, action) {
+  try {
+    const res = await fetch(`${BASE}/instances/${encodeURIComponent(inst.id)}/${action}`, { method: 'POST', headers: { 'X-Crew-Token': CONTROL_TOKEN } })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(body.error || `service answered ${res.status}`)
+    host.notify({ kind: 'info', message: action === 'start' ? `Starting ${inst.name}...` : `Stopped ${inst.name}.` })
+  } catch (err) {
+    host.notify({ kind: 'error', message: `Could not ${action} ${inst.name}: ${(err && err.message) || err}` })
+  }
+}
+
+function InstanceRow({ inst, now, canControl }) {
+  const v = instanceView(inst, now / 1000, canControl)
+  const [confirming, setConfirming] = useState(false)
+  const [pending, setPending] = useState(false)
+  const run = action => {
+    setConfirming(false)
+    setPending(true)
+    instanceAction(inst, action).finally(() => setPending(false))
+  }
+  const link = (text, onClick, style) => jsx('button', { type: 'button', className: 'crew-link', style: style || DIM, disabled: pending, onClick, children: text })
+  let buttons = null
+  if (pending) buttons = jsx('span', { style: DIM, children: '...' })
+  else if (v.action === 'start') buttons = link('start', () => run('start'))
+  else if (v.action === 'stop' && !confirming) buttons = link('stop', () => setConfirming(true))
+  else if (v.action === 'stop') buttons = jsxs('span', { className: 'crew-confirm', children: [jsx('span', { style: WARN, children: 'stop it?' }), link('yes', () => run('stop'), WARN), link('no', () => setConfirming(false))] })
+  const color = v.state === 'stopped' ? 'var(--ui-text-quaternary)' : 'var(--ui-accent)'
+  return jsxs('div', { className: 'crew-inst', children: [
+    jsx(Dot, { color, state: v.state === 'starting' ? 'thinking' : v.state === 'stopped' ? 'offline' : 'job' }),
+    jsxs('span', { className: 'crew-main', children: [
+      jsxs('span', { className: 'crew-job', children: [
+        jsx('span', { className: 'crew-job-label', style: { color: v.state === 'stopped' ? 'var(--ui-text-tertiary)' : 'var(--ui-text-secondary)' }, children: v.name }),
+        buttons,
+      ] }),
+      jsx('span', { className: 'crew-gpu-meta', style: DIM, children: v.meta }),
+    ] }),
+  ] })
+}
+
+function InstancesBlock({ crew, now }) {
+  const list = (crew && crew.instances) || []
+  if (!list.length) return null
+  const canControl = Boolean(crew.control && CONTROL_TOKEN)
+  return jsxs('div', {
+    className: 'crew-instances',
+    style: { borderBottom: '1px solid var(--ui-stroke-secondary)' },
+    children: [
+      jsx('div', { className: 'crew-head', style: { color: 'var(--ui-text-quaternary)' }, children: 'LOCAL INSTANCES' }),
+      ...list.map(inst => jsx(InstanceRow, { inst, now, canControl }, inst.id)),
+    ],
+  })
+}
+
 function Finished({ crew, now }) {
   const items = finishedView(crew, now / 1000)
   if (!items.length) return null
@@ -534,6 +608,7 @@ function CrewPane({ onToggleIdle }) {
     className: 'crew-pane',
     children: [
       jsx(GpuRow, { gpu: crew && crew.gpu }),
+      jsx(InstancesBlock, { crew, now }),
       crew ? null : note('Status service offline: background jobs are not shown.'),
       crew && crew.api !== API ? note(`Status service is version ${crew.version || 'unknown'} and this panel expects another: re-run install.ps1.`) : null,
       jsxs('div', { className: 'crew-bar-row', style: DIM, children: [
@@ -605,6 +680,10 @@ const CSS = `
 .crew-bar-fill{height:100%;border-radius:2px;transition:width .4s ease}
 .crew-bar-row{display:flex;justify-content:space-between;align-items:center;padding:6px 12px 0;font-size:.6875rem}
 .crew-link{padding:0;border:0;background:transparent;font-size:.6875rem;cursor:pointer;text-decoration:underline}
+.crew-instances{display:flex;flex-direction:column;gap:6px;padding:8px 12px}
+.crew-inst{display:flex;gap:8px;align-items:flex-start}
+.crew-confirm{display:inline-flex;gap:6px;flex:none}
+.crew-link:disabled{opacity:.5;cursor:default}
 .crew-finished{display:flex;flex-direction:column;gap:2px;margin-top:4px;padding:8px 12px}
 .crew-head{font-size:.625rem;letter-spacing:.06em;margin-bottom:2px}
 .crew-tip{display:flex;flex-direction:column;gap:2px;font-size:.6875rem}

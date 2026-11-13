@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import plugin, { progressOf, rowCss, ago, deriveRows, fmtElapsed, fmtEta, waitingOf, crewEvents, finishedView, gpuView, chipSummary } from '../plugin.js'
+import plugin, { progressOf, rowCss, ago, deriveRows, fmtElapsed, fmtEta, waitingOf, crewEvents, finishedView, gpuView, chipSummary, instanceView } from '../plugin.js'
 
 const NOW = 1_800_000_000_000
 const sec = n => NOW / 1000 - n
@@ -182,4 +182,16 @@ test('gpuView: bar fraction, stats line without repeating the label, queue', () 
   assert.equal(g.queue, 'waiting for GPU: Asset Bot, Trailer Bot')
   assert.equal(gpuView({ label: 'Ladder 256K local · 21.5/24.0 GB', vram_used_mib: 22016, vram_total_mib: 24564 }).meta, '')
   assert.deepEqual(gpuView({ label: 'Ladder unreachable' }), { frac: null, meta: '', queue: '' })
+})
+
+test('instanceView: what is shown, and a button only for listed instances with control on', () => {
+  const up = { id: 'comfyui', name: 'ComfyUI', state: 'running', port: 8188, vram_mib: 6144, started_at: 1000 - 7500, listed: true, can_start: true, can_stop: true }
+  assert.deepEqual(instanceView(up, 1000, true), { id: 'comfyui', name: 'ComfyUI', state: 'running', meta: 'port 8188 · 6.0 GB · up 2h 05m', action: 'stop' })
+  assert.equal(instanceView(up, 1000, false).action, null)
+  const down = { ...up, state: 'stopped', vram_mib: null, started_at: null }
+  assert.deepEqual([instanceView(down, 1000, true).meta, instanceView(down, 1000, true).action], ['port 8188 · stopped', 'start'])
+  assert.equal(instanceView({ ...down, can_start: false }, 1000, true).action, null)
+  assert.equal(instanceView({ ...up, state: 'starting' }, 1000, true).action, 'stop')
+  const found = { id: 'ollama', name: 'Ollama', state: 'running', port: 11434, listed: false, can_start: false, can_stop: false }
+  assert.deepEqual([instanceView(found, 1000, true).meta, instanceView(found, 1000, true).action], ['port 11434 · detected', null])
 })

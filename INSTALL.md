@@ -49,10 +49,14 @@ Expand-Archive "$env:TEMP\hermes-crew-monitor.zip" "$env:TEMP\hermes-crew-monito
 ```
 The installer is then `"$env:TEMP\hermes-crew-monitor\hermes-crew-monitor-main\install.ps1"`.
 
+Do not add `-EnableControl` unless the user asked for the start/stop buttons: it lets the panel run
+and end the programs listed in the user's settings file. If they did ask, add it to the same command
+and tell them it is on.
+
 ## Step 3: confirm it worked
 Success is exit code 0 and output ending like this:
 ```
-Crew Monitor service 0.2.0 OK: 11 bots, 0 live background job(s). GPU: ...
+Crew Monitor service 0.3.0 OK: 11 bots, 0 live background job(s). GPU: ...
 Restart Hermes Desktop to load the plugin.
 ```
 The bot count must match the user's bots. `0 bots` means the wrong folder was used: run the

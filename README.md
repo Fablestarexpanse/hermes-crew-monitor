@@ -11,6 +11,8 @@ strip shows them idle while the job still runs.
 - Top block: a VRAM bar with GPU utilisation and temperature (when `nvidia-smi` is present). With the
   optional Fit Ladder / `gpu_job` tools it also reads `Ladder 256K local · 21.5/24.0 GB`,
   `held by gpu_job comfyui` or `cloud fallback`, and lists who is waiting for the GPU.
+- **Local instances**: which local AI servers are up (ComfyUI, Ollama, LM Studio, your own), with
+  port, VRAM and uptime, and optional **start** / **stop** buttons (see Local instances below).
 - One row per bot with a coloured dot: pulsing = thinking, solid = background job (label + elapsed
   such as `desloppify review  1h 02m`), dim = idle, hollow = unknown (roster unreachable), amber =
   **waiting for you** (see Limits).
@@ -119,6 +121,32 @@ occasionally linger in the list.
 `rules` are regular expressions tried against a job's command line before the built-in labels;
 `colors` override the built-in bot colours.
 
+## Local instances
+The panel lists local AI servers and apps and whether each is up. Ollama (port 11434), ComfyUI (8188),
+LM Studio (1234) and Stable Diffusion WebUI (7860) are shown automatically while they are listening,
+marked `detected`. List your own in `crew-monitor.json`:
+```json
+"instances": [
+  { "name": "ComfyUI", "port": 8188, "start": "run_nvidia_gpu.bat", "cwd": "D:\\ComfyUI" },
+  { "name": "Ollama", "process": "ollama.exe", "start": "ollama serve", "stop": "ollama stop llama3" }
+]
+```
+- `name`, and `port` (up = something listens on it) or `process` (up = that program is running).
+- `start`: the command the **start** button runs, in `cwd`. Leave it out for stop-only.
+- `stop` (optional): a command to run first when stopping. After it, the processes are ended.
+- `window: true` shows the program's console; otherwise its output goes to
+  `%LOCALAPPDATA%\HermesCrewMonitor\instances\<id>.log`.
+
+**Buttons are off until you turn them on**, because they let the service run and end programs:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -EnableControl
+```
+then restart Hermes Desktop. `-DisableControl` goes back to read-only. With control on:
+- only instances you listed can be started or stopped, and only with the command you wrote; detected
+  ones never get buttons;
+- **stop** asks "stop it?" first; it ends the program and everything it started, without saving;
+- VRAM per instance appears only where the NVIDIA driver reports it (often not on Windows).
+
 ## Troubleshooting
 - The panel is there but empty: the service is reading the wrong folder. Re-run the installer with
   `-HermesHome`; the log has a line saying so.
@@ -140,8 +168,13 @@ Your `crew-monitor.json` is kept.
 on Windows and Linux.
 
 ## Safety
-- Read-only: writes no Hermes file; listens on 127.0.0.1 only; the only outbound calls are to the
-  Ladder on 127.0.0.1 and `nvidia-smi`.
+- Read-only by default: writes no Hermes file; listens on 127.0.0.1 only; the only outbound calls
+  are to the Ladder on 127.0.0.1, `nvidia-smi`, `netstat` and `tasklist`.
+- With `-EnableControl` it can also start and stop the instances listed in your settings file, and
+  nothing else. Each such request must carry a secret made at install time and stored only in
+  `%LOCALAPPDATA%\HermesCrewMonitor\control-token.txt` and the installed plugin file, so another
+  program or web page that reaches the port cannot use it. Anyone who can edit your settings file can
+  change what **start** runs; it is in your own profile folder.
 - Web pages cannot read it: requests whose `Origin` is an ordinary web site, or whose `Host` is not
   loopback (DNS rebinding), get 403. App shells (`app://`, `file://`, `null`) and loopback pages pass.
   `null` is also what a sandboxed iframe on a web page sends, so to close that too, look up Desktop's
