@@ -41,7 +41,16 @@ Bots with open kanban tasks list them.
 
 ![Hover card with kanban tasks](docs/img/hover-scout-light.png)
 
-## Install (Windows)
+## Install with your agent
+Tell your Hermes bot (or any AI agent that can run commands on your PC):
+
+> Read https://raw.githubusercontent.com/Fablestarexpanse/hermes-crew-monitor/main/INSTALL.md and
+> follow it to install Crew Monitor.
+
+[INSTALL.md](INSTALL.md) is written for an agent: it finds your Hermes folder, downloads this
+repository, runs the installer, checks the result, and then asks you to restart Hermes Desktop.
+
+## Install yourself (Windows)
 You need Hermes Desktop and Windows 10 or 11. Python comes with Hermes; if yours has none, install
 Python 3.9 or newer from python.org. Nothing else is downloaded or installed.
 
