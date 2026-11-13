@@ -9,7 +9,7 @@ It only exists because a Hermes Desktop plugin cannot read the filesystem or pro
 "Thinking" state is NOT computed here: the plugin reads it from the same profiles.list roster
 data Desktop's own "Active now" uses (see docs/FINDINGS.md).
 
-    pythonw.exe crew_status.py [--home F:\\Hermes\\data] [--port 8094] [--log FILE] [--config FILE]
+    python crew_status.py [--home <Hermes data folder>] [--port 8094] [--log FILE] [--config FILE]
                                [--gpu-lock FILE] [--ladder-url URL] [--allow-origin ORIGIN ...]
 """
 from __future__ import annotations
@@ -34,7 +34,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
 
-DEFAULT_HOME = Path(os.environ.get("HERMES_HOME") or r"F:\Hermes\data")
+# The Hermes data folder (the one holding profiles/): $HERMES_HOME, else Hermes' own default ~/.hermes.
+DEFAULT_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 DEFAULT_PORT = 8094
 LADDER_URL = "http://127.0.0.1:8093/"
 VERSION = "0.2.0"
@@ -380,9 +381,18 @@ def read_nvidia(run=subprocess.run) -> Optional[dict]:
     return {"util_pct": util, "temp_c": temp, "vram_used_mib": used, "vram_total_mib": total}
 
 
-def gpu_summary(ladder: Optional[dict], lock: Optional[dict], nvidia: Optional[dict] = None) -> dict:
-    """The /crew "gpu" object. VRAM comes from nvidia-smi when present, else from the ladder."""
-    out = {**gpu_label(ladder, lock), "ladder": ladder, "lock": lock,
+def gpu_summary(ladder: Optional[dict], lock: Optional[dict], nvidia: Optional[dict] = None,
+                ladder_expected: bool = True) -> dict:
+    """The /crew "gpu" object. VRAM comes from nvidia-smi when present, else from the ladder.
+
+    The Fit Ladder and gpu_job lock are optional extras most installs do not have. With
+    ladder_expected False and neither present, the row is plain "GPU" stats from nvidia-smi, or
+    state "none" (the plugin hides the row) rather than "Ladder unreachable".
+    """
+    label = gpu_label(ladder, lock)
+    if not ladder and not lock and not ladder_expected:
+        label = {"state": "local", "label": "GPU"} if nvidia else {"state": "none", "label": ""}
+    out = {**label, "ladder": ladder, "lock": lock,
            "vram_used_mib": None, "vram_total_mib": None, "util_pct": None, "temp_c": None, "queue": []}
     for src in (ladder, nvidia):
         for k in ("vram_used_mib", "vram_total_mib", "util_pct", "temp_c"):
@@ -401,8 +411,9 @@ class GpuPoller:
 
     def __init__(self, lock_path: Path, ladder_url: str = LADDER_URL, probe: Probe = probe_pid):
         self.lock_path, self.ladder_url, self.probe = lock_path, ladder_url, probe
-        self._value = gpu_summary(None, None)
+        self._value = gpu_summary(None, None, None, False)
         self._nvidia, self._nvidia_at, self._nvidia_every = None, 0.0, 5.0
+        self._ladder_seen = False  # it answered at least once: from then on, silence is worth reporting
 
     def get(self) -> dict:
         return self._value
@@ -412,7 +423,9 @@ class GpuPoller:
         if now - self._nvidia_at >= self._nvidia_every:
             self._nvidia, self._nvidia_at = read_nvidia(), now
             self._nvidia_every = 5.0 if self._nvidia else 60.0  # no nvidia-smi: look again each minute
-        self._value = gpu_summary(_get_json(self.ladder_url), read_lock(self.lock_path, self.probe), self._nvidia)
+        ladder = _get_json(self.ladder_url) if self.ladder_url else None
+        self._ladder_seen = self._ladder_seen or bool(ladder)
+        self._value = gpu_summary(ladder, read_lock(self.lock_path, self.probe), self._nvidia, self._ladder_seen)
 
     def run(self, stop: threading.Event) -> None:
         while not stop.is_set():
@@ -748,13 +761,14 @@ class Server(ThreadingHTTPServer):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--home", type=Path, default=DEFAULT_HOME)
+    ap.add_argument("--home", type=Path, default=DEFAULT_HOME,
+                    help="Hermes data folder, the one containing profiles/ (default: $HERMES_HOME or ~/.hermes)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--log", type=Path, help="rotating log file (pythonw has no console)")
     ap.add_argument("--config", type=Path, default=Path(__file__).with_name("crew-monitor.json"),
                     help="optional JSON: classifier rules, bot colours, stall_minutes")
     ap.add_argument("--gpu-lock", type=Path, help="gpu_job lock file (default: derived from --home)")
-    ap.add_argument("--ladder-url", default=LADDER_URL)
+    ap.add_argument("--ladder-url", default=LADDER_URL, help='Fit Ladder status URL; "" to never ask')
     ap.add_argument("--allow-origin", action="append", default=[],
                     help="exact Origin allowed to read the service; repeatable. Default: any non-web origin")
     a = ap.parse_args(argv)
@@ -763,6 +777,8 @@ def main(argv=None) -> int:
         h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         log.addHandler(h)
         log.setLevel(logging.INFO)
+    if not (a.home / "profiles").is_dir():
+        log.warning("no profiles folder in %s: is --home the Hermes data folder?", a.home)
     try:
         poller = GpuPoller(a.gpu_lock or default_gpu_lock(a.home), a.ladder_url)
         mon = Monitor(a.home, gpu=poller.get, config=ConfigFile(a.config))

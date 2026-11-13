@@ -490,7 +490,7 @@ function BotRow({ bot, now }) {
 }
 
 function GpuRow({ gpu }) {
-  if (!gpu) return null
+  if (!gpu || gpu.state === 'none') return null // 'none': no ladder, no gpu_job lock, no nvidia-smi
   const color = gpu.state === 'unknown' ? 'var(--ui-text-quaternary)' : 'var(--ui-accent)'
   const v = gpuView(gpu)
   return jsxs('div', {

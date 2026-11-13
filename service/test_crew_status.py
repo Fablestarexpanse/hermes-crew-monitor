@@ -256,6 +256,17 @@ class GpuExtras(unittest.TestCase):
         self.assertEqual(cs.gpu_summary(ladder, None)["vram_used_mib"], 100)
         self.assertIsNone(cs.gpu_summary(None, None)["vram_total_mib"])
 
+    def test_without_a_ladder_installed_the_row_is_plain_gpu_stats_or_hidden(self):
+        nv = {"util_pct": 9, "temp_c": 50, "vram_used_mib": 200, "vram_total_mib": 24564}
+        self.assertEqual(cs.gpu_summary(None, None, None, False)["state"], "none")
+        g = cs.gpu_summary(None, None, nv, False)
+        self.assertEqual((g["state"], g["label"], g["vram_used_mib"]), ("local", "GPU", 200))
+        self.assertEqual(cs.gpu_summary(None, None, nv, True)["label"], "Ladder unreachable")  # it used to answer
+        self.assertEqual(cs.gpu_summary(None, {"app": "comfyui"}, nv, False)["state"], "held")
+
+    def test_default_home_is_hermes_own_default_not_one_machine(self):
+        self.assertIn(cs.DEFAULT_HOME, (Path.home() / ".hermes", Path(__import__("os").environ.get("HERMES_HOME") or "x")))
+
     def test_queue_is_every_gpu_job_but_the_lock_holder(self):
         def bots():
             job = lambda pid, app, t: {"kind": "gpu", "pid": pid, "app": app, "label": f"GPU job ({app})", "started_at": t}

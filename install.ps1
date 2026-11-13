@@ -1,12 +1,13 @@
 # Crew Monitor installer: copies the plugin into Hermes Desktop, installs + starts the status service.
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+#   ... -HermesHome D:\Hermes\data  the Hermes data folder (the one containing "profiles"), if not found
 #   ... -Port 8100                 another port (the installed plugin copy is pointed at it)
-#   ... -Python C:\path\pythonw.exe  a specific Python (default: newest under <HermesHome>\tools, then PATH)
+#   ... -Python C:\path\pythonw.exe  a specific Python 3.9+ (default: Hermes' bundled one, then PATH)
 #   ... -AllowOrigin app://hermes  only this page origin may read the service (repeatable, comma-separated)
 #   ... -Uninstall                 stops the service, removes the logon task, the plugin and the service copy
 param(
     [switch]   $Uninstall,
-    [string]   $HermesHome  = "F:\Hermes\data",
+    [string]   $HermesHome  = "",
     [int]      $Port        = 8094,
     [string]   $Python      = "",
     [string[]] $AllowOrigin = @(),
@@ -15,8 +16,28 @@ param(
 $ErrorActionPreference = "Stop"
 $Here       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TaskName   = "HermesCrewMonitor"
-$HermesHome = $HermesHome.TrimEnd('\')
-$PluginDir  = Join-Path $HermesHome "desktop-plugins\crew-monitor"
+
+# The Hermes data folder: -HermesHome, then $env:HERMES_HOME, then the usual places. It is recognised
+# by what Hermes keeps in it; nothing is guessed if none of them looks like one.
+function Find-HermesHome {
+    $Looks = { param($p) $p -and ((Test-Path -LiteralPath (Join-Path $p "profiles")) -or (Test-Path -LiteralPath (Join-Path $p "config.yaml")) -or (Test-Path -LiteralPath (Join-Path $p "desktop-plugins"))) }
+    if ($HermesHome) {
+        if (-not (Test-Path -LiteralPath $HermesHome)) { throw "Hermes data folder not found: $HermesHome" }
+        if (-not (& $Looks $HermesHome)) { Write-Warning "$HermesHome has no 'profiles' folder or config.yaml: is it the Hermes data folder?" }
+        return $HermesHome
+    }
+    $Candidates = @(
+        $env:HERMES_HOME,
+        [Environment]::GetEnvironmentVariable("HERMES_HOME", "User"),
+        (Join-Path $env:USERPROFILE ".hermes"),
+        (Join-Path $env:LOCALAPPDATA "hermes"),
+        (Join-Path $env:APPDATA "hermes")
+    )
+    foreach ($C in $Candidates) { if (& $Looks $C) { return $C } }
+    return ""
+}
+$HermesHome = (Find-HermesHome).TrimEnd('\')
+$PluginDir  = if ($HermesHome) { Join-Path $HermesHome "desktop-plugins\crew-monitor" } else { "" }
 $Service    = Join-Path $InstallDir "crew_status.py"
 $Config     = Join-Path $InstallDir "crew-monitor.json"
 $Log        = Join-Path $InstallDir "crew-monitor.log"
@@ -35,21 +56,23 @@ function Find-Python {
         return $Python
     }
     # Hermes' own Python, whatever build is installed: no exact version in this script.
-    $Bundled = Get-ChildItem -Path (Join-Path $HermesHome "tools") -Filter "python-*" -Directory -ErrorAction SilentlyContinue |
+    $Bundled = if (-not $HermesHome) { $null } else { Get-ChildItem -Path (Join-Path $HermesHome "tools") -Filter "python-*" -Directory -ErrorAction SilentlyContinue |
         ForEach-Object { Join-Path $_.FullName "pythonw.exe" } |
         Where-Object { Test-Path -LiteralPath $_ } |
         Sort-Object { (Get-Item -LiteralPath $_).LastWriteTime } -Descending |
-        Select-Object -First 1
+        Select-Object -First 1 }
     if ($Bundled) { return $Bundled }
-    $OnPath = Get-Command pythonw.exe -ErrorAction SilentlyContinue
+    # Not the Microsoft Store placeholder in WindowsApps: that one opens the Store instead of running.
+    $OnPath = Get-Command pythonw.exe -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike "*\WindowsApps\*" } | Select-Object -First 1
     if ($OnPath) { return $OnPath.Source }
-    throw "No pythonw.exe under $HermesHome\tools or on PATH. Pass -Python <path to pythonw.exe>."
+    throw "No Python found. Install Python 3.9 or newer from python.org, or pass -Python <path to pythonw.exe>."
 }
 
 if ($Uninstall) {
     Stop-CrewService
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $PluginDir) { Remove-Item -LiteralPath $PluginDir -Recurse -Force }
+    if (-not $PluginDir) { Write-Warning "Hermes data folder not found, so the plugin file was not removed. Re-run with -HermesHome <folder> or delete desktop-plugins\crew-monitor yourself." }
+    elseif (Test-Path -LiteralPath $PluginDir) { Remove-Item -LiteralPath $PluginDir -Recurse -Force }
     if (Test-Path -LiteralPath $InstallDir) {
         # the config is yours: it stays unless it is the only thing you ever had there
         Get-ChildItem -LiteralPath $InstallDir -Force | Where-Object { $_.Name -ne "crew-monitor.json" } | Remove-Item -Recurse -Force
@@ -60,7 +83,14 @@ if ($Uninstall) {
     exit 0
 }
 
+if (-not $HermesHome) {
+    throw "Could not find your Hermes data folder (the one containing 'profiles'). Re-run with: -HermesHome <that folder>"
+}
+Write-Host "Hermes data folder: $HermesHome"
 $PythonW = Find-Python
+$Console = Join-Path (Split-Path -Parent $PythonW) "python.exe"   # pythonw prints nothing
+$Version = if (Test-Path -LiteralPath $Console) { & $Console -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null } else { $null }
+if ($Version -and ([version]$Version -lt [version]"3.9")) { throw "Python $Version at $PythonW is too old: 3.9 or newer is needed. Pass -Python <path>." }
 
 # 1. Plugin: a single ESM file, loaded uncompiled by Desktop. The port is the one thing set at install.
 New-Item -ItemType Directory -Force -Path $PluginDir | Out-Null
